@@ -1,0 +1,24 @@
+# Build output
+bin/
+obj/
+publish/
+ui/
+.vs/
+*.user
+
+# Portable runtime data (created beside the exe)
+library.db
+library.db-wal
+library.db-shm
+thumbs/
+export/
+settings.json
+*.log
+selftest-*.txt
+selftest-*/
+
+# Test fixtures are real user images — keep the structure, not the binaries
+tests/fixtures/**/*.png
+tests/fixtures/**/*.jpg
+tests/fixtures/**/*.jpeg
+tests/fixtures/**/*.webp

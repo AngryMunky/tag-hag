@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Browse Civitai</title>
+<style>
+  :root{--bg:#141018;--panel:#17131e;--panel2:#221d2b;--slate:#2B2A33;--purple:#5B3B8C;--acid:#A4FF6A;--brass:#C7A252;--bone:#D8D0BF;--mut:#888780;}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--bone);font-family:'Segoe UI',Inter,system-ui,sans-serif;font-size:13px;overflow:hidden}
+  #app{display:flex;flex-direction:column;height:100%}
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 12px;background:#1B1622;border-bottom:1px solid var(--slate)}
+  header .brand{font-weight:600;color:var(--acid)}
+  header label{display:flex;align-items:center;gap:5px;color:var(--mut);font-size:12px}
+  select,input,button{background:var(--panel2);color:var(--bone);border:1px solid var(--slate);border-radius:6px;padding:5px 8px;font-size:12px;outline:none}
+  button{cursor:pointer} button:hover{border-color:var(--acid)}
+  button.primary{background:var(--acid);color:#173404;border:none;font-weight:600}
+  button:disabled{opacity:.5;cursor:default}
+  #bar{display:flex;align-items:center;gap:8px;padding:7px 12px;background:var(--panel2);border-bottom:1px solid var(--slate)}
+  #bar .status{color:var(--mut);font-size:12px;margin-left:6px}
+  main{flex:1;overflow:auto;padding:12px}
+  #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px}
+  .card{position:relative;background:var(--slate);border:1px solid var(--slate);border-radius:8px;overflow:hidden;aspect-ratio:1/1;cursor:pointer}
+  .card img{width:100%;height:100%;object-fit:cover;display:block}
+  .card:hover{border-color:#3a3744}
+  .card.sel{outline:2px solid var(--acid);outline-offset:-2px;border-color:var(--acid)}
+  .card.imp{opacity:.45;cursor:default}
+  .cb{position:absolute;top:6px;left:6px;width:20px;height:20px;border-radius:5px;border:2px solid #cfcabd;background:rgba(20,16,24,.55);display:flex;align-items:center;justify-content:center;font-size:13px;color:#173404}
+  .cb.on{background:var(--acid);border-color:var(--acid)}
+  .impbadge{position:absolute;top:6px;right:6px;background:var(--purple);color:#EEEDFE;font-size:11px;padding:1px 6px;border-radius:4px}
+  .rx{position:absolute;left:0;right:0;bottom:0;display:flex;gap:1px;justify-content:center;padding:3px 2px;background:rgba(20,16,24,.72)}
+  .rx button{background:transparent;border:none;color:var(--bone);font-size:11px;padding:2px 5px;border-radius:4px;cursor:pointer}
+  .rx button:hover{background:var(--panel2);border-color:transparent}
+  .rx button.on{color:var(--acid)}
+  .rx button.busy{opacity:.5;cursor:default}
+  #work{flex:1;display:flex;min-height:0}
+  #inspector{width:340px;flex-shrink:0;overflow:auto;background:var(--panel);border-left:1px solid var(--slate);padding:16px}
+  .ipempty{color:var(--mut);font-size:12px;padding:24px 6px;text-align:center}
+  #ip-pic{width:100%;max-height:340px;object-fit:contain;border-radius:6px;background:#26222e;margin-bottom:8px}
+  #ip-name{font-weight:600;font-size:12px}
+  #ip-meta{color:var(--mut);font-size:11px;margin-bottom:6px}
+  .ip-h{color:var(--mut);font-size:11px;letter-spacing:.05em;text-transform:uppercase;margin:12px 0 4px}
+  .ip-txt{white-space:pre-wrap;line-height:1.5;background:var(--panel2);border:1px solid var(--slate);border-radius:6px;padding:8px;max-height:150px;overflow:auto;font-size:12px}
+  #ip-loras{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px}
+  .loratag{background:var(--panel2);color:#CECBF6;font-size:11px;padding:2px 7px;border-radius:6px}
+  table.kv{width:100%;font-size:12px;border-collapse:collapse}
+  table.kv td{padding:2px 0} table.kv td:first-child{color:var(--mut);width:64px}
+  .ip-btn{margin-top:8px;margin-right:6px;background:transparent;color:var(--acid);border:1px solid #3a3744;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer}
+  .ip-btn:hover{border-color:var(--acid)}
+  #sentinel{height:1px}
+  .empty{color:var(--mut);text-align:center;padding:48px 0}
+  footer{display:flex;justify-content:space-between;padding:6px 12px;background:#1B1622;border-top:1px solid var(--slate);color:var(--mut);font-size:11px}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <span class="brand">Browse Civitai</span>
+    <label>Period
+      <select id="period"><option value="Day">Today</option><option value="Week">This week</option><option value="Month">This month</option><option value="AllTime" selected>All time</option></select>
+    </label>
+    <label>Sort
+      <select id="sort"><option>Most Reactions</option><option>Newest</option><option>Most Comments</option></select>
+    </label>
+    <label>NSFW
+      <select id="nsfw"><option>None</option><option>Soft</option><option>Mature</option><option selected>X</option></select>
+    </label>
+    <label>Min likes <input id="minlikes" type="number" value="0" min="0" style="width:72px" /></label>
+    <label><input type="checkbox" id="followed" /> Followed only</label>
+    <button id="refresh">Refresh</button>
+  </header>
+  <div id="bar">
+    <button id="selall">Select all</button>
+    <button id="clear">Clear</button>
+    <button id="import" class="primary" disabled>Import selected</button>
+    <span class="status" id="status">Choose filters, then Refresh.</span>
+  </div>
+  <div id="work">
+    <main id="scroll">
+      <div id="grid"></div>
+      <div id="sentinel"></div>
+      <div id="empty" class="empty" style="display:none">Nothing here for these filters.</div>
+    </main>
+    <aside id="inspector">
+      <div id="ip-empty" class="ipempty">Click an image to preview its prompt &amp; details.</div>
+      <div id="ip-body" style="display:none">
+        <img id="ip-pic" alt="" />
+        <div id="ip-name"></div><div id="ip-meta"></div>
+        <div class="ip-h">Positive</div><div id="ip-pos" class="ip-txt"></div>
+        <button class="ip-btn" data-ipcopy="pos">Copy positive</button>
+        <div class="ip-h">Negative</div><div id="ip-neg" class="ip-txt"></div>
+        <button class="ip-btn" data-ipcopy="neg">Copy negative</button>
+        <div class="ip-h">Checkpoint</div><div id="ip-model" class="ip-txt"></div>
+        <div class="ip-h" id="ip-lorah" style="display:none">LoRAs</div><div id="ip-loras"></div>
+        <div class="ip-h">Details</div><table class="kv" id="ip-kv"></table>
+        <button class="ip-btn" data-ipcopy="full">Copy full A1111</button>
+        <button class="ip-btn" id="ip-import">Import this</button>
+      </div>
+    </aside>
+  </div>
+  <footer><span id="count">—</span><span>v__VERSION__</span></footer>
+</div>
+<script>
+(function(){
+  const $=s=>document.querySelector(s);
+  const grid=$('#grid'),scroll=$('#scroll'),empty=$('#empty'),countEl=$('#count'),statusEl=$('#status'),importBtn=$('#import');
+  let cursor=null, loading=false, exhausted=false, busy=false;
+  let loaded=[], sel=new Set(), panelMeta=null;
+  function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+  function post(m){ if(window.chrome&&window.chrome.webview) window.chrome.webview.postMessage(JSON.stringify(m)); }
+  function opts(){ return { period:$('#period').value, sort:$('#sort').value, nsfw:$('#nsfw').value, minLikes:parseInt($('#minlikes').value||'0',10)||0, followed:$('#followed').checked }; }
+
+  function reset(){ grid.innerHTML=''; loaded=[]; sel.clear(); cursor=null; exhausted=false; empty.style.display='none'; updateImportBtn(); showPanelEmpty(); }
+  function loadFeed(){ if(loading||exhausted)return; loading=true; statusEl.textContent='Loading…'; const o=opts(); post({type:'feed',...o,cursor}); }
+  function refresh(){ reset(); loadFeed(); }
+  $('#refresh').onclick=refresh;
+  ['period','sort','nsfw','followed'].forEach(id=>$('#'+id).addEventListener('change',refresh));
+  $('#minlikes').addEventListener('change',refresh);
+
+  function updateImportBtn(){ importBtn.disabled = busy || sel.size===0; importBtn.textContent = sel.size>0?('Import selected ('+sel.size+')'):'Import selected'; }
+  $('#selall').onclick=()=>{ loaded.forEach((it,i)=>{ if(!it.imported){ sel.add(it.id); paint(i);} }); updateImportBtn(); };
+  $('#clear').onclick=()=>{ sel.clear(); document.querySelectorAll('.card.sel').forEach(c=>{c.classList.remove('sel');c.querySelector('.cb').classList.remove('on');}); updateImportBtn(); };
+  importBtn.onclick=()=>{ if(busy||!sel.size)return; busy=true; updateImportBtn(); post({type:'import',ids:[...sel]}); };
+
+  function paint(i){ const c=grid.querySelector('.card[data-i="'+i+'"]'); if(!c)return; const on=sel.has(loaded[i].id); c.classList.toggle('sel',on); c.querySelector('.cb').classList.toggle('on',on); }
+  function toggle(i){ const it=loaded[i]; if(it.imported)return; if(sel.has(it.id))sel.delete(it.id); else sel.add(it.id); paint(i); updateImportBtn(); }
+
+  const RX=[['Like','👍','likes'],['Heart','❤️','hearts'],['Laugh','😂','laugh'],['Cry','😮','cry']];
+  const reactPending=new Map();   // "id:reaction" -> button, awaiting server confirm (commit UI only on success)
+  function react(i,reaction,btn){ const it=loaded[i]; const key=it.id+':'+reaction;
+    if(btn.classList.contains('on')||reactPending.has(key))return;   // already reacted, or in flight (avoid double-toggle)
+    reactPending.set(key,btn); btn.classList.add('busy'); post({type:'react',id:it.id,reaction}); }
+  function addCards(items){ for(const it of items){ const i=loaded.length; loaded.push(it);
+    const c=document.createElement('div'); c.className='card'+(it.imported?' imp':''); c.dataset.i=i;
+    const img=document.createElement('img'); img.loading='lazy'; img.src=it.thumb; img.onerror=()=>{c.style.background='#26222e';img.remove();};
+    c.appendChild(img);
+    const cb=document.createElement('div'); cb.className='cb'; cb.textContent='✓'; c.appendChild(cb);
+    if(it.imported){ const b=document.createElement('span'); b.className='impbadge'; b.textContent='imported'; c.appendChild(b); }
+    const rx=document.createElement('div'); rx.className='rx';
+    for(const [reaction,emoji,key] of RX){ const b=document.createElement('button'); b.title='React '+reaction;
+      b.innerHTML=emoji+' <span>'+(it[key]||0)+'</span>'; b.onclick=(e)=>{e.stopPropagation();react(i,reaction,b);}; rx.appendChild(b); }
+    c.appendChild(rx);
+    c.onclick=()=>{ toggle(i); requestInspect(i); }; grid.appendChild(c); } }
+
+  // ---- detail panel ----
+  function showPanelEmpty(){ const b=$('#ip-body'),e=$('#ip-empty'); if(b)b.style.display='none'; if(e)e.style.display='block'; panelMeta=null; }
+  function requestInspect(i){ post({type:'inspect',id:loaded[i].id}); }
+  function showPanel(m){ panelMeta=m; $('#ip-empty').style.display='none'; $('#ip-body').style.display='block';
+    $('#ip-pic').src=m.preview||'';
+    $('#ip-name').textContent='image '+m.id;
+    $('#ip-meta').textContent='♥ '+(m.likes||0)+' · '+(m.width||'?')+'×'+(m.height||'?')+(m.nsfw?(' · '+m.nsfw):'');
+    $('#ip-pos').textContent=m.positive||'(none)'; $('#ip-neg').textContent=m.negative||'(none)';
+    $('#ip-model').textContent=m.model||'(unknown)';
+    const lh=$('#ip-lorah'), lc=$('#ip-loras'); lc.innerHTML='';
+    if(m.loras&&m.loras.length){ lh.style.display='block'; for(const l of m.loras){ const s=document.createElement('span'); s.className='loratag'; s.textContent=l.name+(l.weight?(' :'+l.weight):''); lc.appendChild(s);} } else lh.style.display='none';
+    const kv=$('#ip-kv'); kv.innerHTML='';
+    [['Sampler',m.sampler],['Steps',m.steps],['CFG',m.cfg],['Seed',m.seed]].forEach(([k,v])=>{ if(v===null||v===undefined||v==='')return; const tr=document.createElement('tr'); tr.innerHTML='<td>'+k+'</td><td>'+esc(String(v))+'</td>'; kv.appendChild(tr);}); }
+  document.querySelectorAll('[data-ipcopy]').forEach(b=>b.onclick=()=>{ if(!panelMeta)return; const which=b.dataset.ipcopy; let t='';
+    if(which==='pos')t=panelMeta.positive||''; else if(which==='neg')t=panelMeta.negative||'';
+    else{ t=(panelMeta.positive||''); if(panelMeta.negative)t+='\nNegative prompt: '+panelMeta.negative; t+='\nSteps: '+(panelMeta.steps||0)+', Sampler: '+(panelMeta.sampler||'')+', CFG scale: '+(panelMeta.cfg||'')+', Seed: '+(panelMeta.seed||'')+', Model: '+(panelMeta.model||''); }
+    post({type:'copy',text:t}); });
+  $('#ip-import').onclick=()=>{ if(!panelMeta||busy)return; busy=true; updateImportBtn(); post({type:'import',ids:[panelMeta.id]}); };
+
+  function markImported(ids){ const set=new Set(ids); loaded.forEach((it,i)=>{ if(set.has(it.id)){ it.imported=true; sel.delete(it.id);
+    const c=grid.querySelector('.card[data-i="'+i+'"]'); if(c){ c.classList.add('imp'); c.classList.remove('sel'); c.querySelector('.cb').classList.remove('on');
+      if(!c.querySelector('.impbadge')){ const b=document.createElement('span'); b.className='impbadge'; b.textContent='imported'; c.appendChild(b);} } } }); updateImportBtn(); }
+
+  window.chrome && window.chrome.webview && window.chrome.webview.addEventListener('message',ev=>{
+    let m; try{m=JSON.parse(ev.data);}catch{return;}
+    if(m.type==='feedpage'){ loading=false; addCards(m.items||[]); cursor=m.nextCursor||null;
+      if(!m.items||m.items.length===0||!cursor) exhausted=true;
+      countEl.textContent=loaded.length+' shown'; statusEl.textContent=exhausted?'End of feed.':'Scroll for more.'; empty.style.display=loaded.length===0?'block':'none'; }
+    else if(m.type==='status'){ statusEl.textContent=m.text; }
+    else if(m.type==='imported'){ markImported(m.ids||[]); }
+    else if(m.type==='importdone'){ busy=false; updateImportBtn(); statusEl.textContent=m.text||'Import complete.'; }
+    else if(m.type==='feederror'){ loading=false; exhausted=true; statusEl.textContent=m.text||'Feed error.'; }
+    else if(m.type==='inspect'){ showPanel(m); }
+    else if(m.type==='reacted'){ const key=m.id+':'+m.reaction; const btn=reactPending.get(key); reactPending.delete(key);
+      if(btn) btn.classList.remove('busy');
+      if(m.ok){ if(btn){ btn.classList.add('on'); const sp=btn.querySelector('span'); if(sp) sp.textContent=String((parseInt(sp.textContent,10)||0)+1); } }
+      else statusEl.textContent='React failed'+(m.error?': '+m.error:''); } });
+
+  new IntersectionObserver(es=>{ if(es[0].isIntersecting) loadFeed(); },{root:scroll,rootMargin:'500px'}).observe($('#sentinel'));
+  loadFeed();
+})();
+</script>
+</body>
+</html>

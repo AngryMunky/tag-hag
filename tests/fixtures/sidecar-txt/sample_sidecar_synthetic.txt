@@ -1,0 +1,3 @@
+a serene mountain lake at sunrise, mirror reflections, pine forest, volumetric mist, ultra detailed, cinematic lighting, 8k
+Negative prompt: blurry, lowres, jpeg artifacts, watermark, text, signature, deformed hands, extra fingers
+Steps: 28, Sampler: DPM++ 2M Karras, CFG scale: 6.5, Seed: 1234567890, Size: 832x1216, Model: novaOrangeAM_v20
