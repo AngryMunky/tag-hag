@@ -142,6 +142,78 @@ public sealed class MainForm : Form
                 _ = HandleDupes(near, gen);
                 return;
             }
+            // ---- v2.0 host-side write intercepts (Favorites/Notes/Collections). Fast single-writer
+            //      ops on the UI _db connection, then push reload/cols so the gallery refreshes.
+            if (type == "fav")
+            {
+                if (d.RootElement.TryGetProperty("id", out var idEl))
+                {
+                    var on = d.RootElement.TryGetProperty("on", out var onEl) && onEl.ValueKind == JsonValueKind.True;
+                    _db.SetFavorite(idEl.GetInt64(), on);
+                    _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");   // refresh grid + favorites count
+                }
+                return;
+            }
+            if (type == "note")
+            {
+                if (d.RootElement.TryGetProperty("id", out var idEl))
+                {
+                    var body = d.RootElement.TryGetProperty("body", out var b) ? b.GetString() ?? "" : "";
+                    _db.SetNote(idEl.GetInt64(), body);   // auto-save-on-blur — silent, no reload
+                }
+                return;
+            }
+            if (type == "colcreate")
+            {
+                var name = d.RootElement.TryGetProperty("name", out var nm) ? nm.GetString() ?? "" : "";
+                if (!string.IsNullOrWhiteSpace(name) && _db.CreateCollection(name) < 0)
+                    SetStatus($"A collection named “{name.Trim()}” already exists.");
+                PushCols();
+                return;
+            }
+            if (type == "colrename")
+            {
+                if (d.RootElement.TryGetProperty("id", out var idEl))
+                {
+                    var name = d.RootElement.TryGetProperty("name", out var nm) ? nm.GetString() ?? "" : "";
+                    if (!string.IsNullOrWhiteSpace(name) && !_db.RenameCollection(idEl.GetInt64(), name))
+                        SetStatus($"Couldn't rename — “{name.Trim()}” may already exist.");
+                    PushCols();
+                }
+                return;
+            }
+            if (type == "coldelete")
+            {
+                if (d.RootElement.TryGetProperty("id", out var idEl))
+                {
+                    _db.DeleteCollection(idEl.GetInt64());          // collection_items cascade away
+                    PushCols();
+                    _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
+                }
+                return;
+            }
+            if (type == "coladd" || type == "colremove")
+            {
+                if (d.RootElement.TryGetProperty("collectionId", out var cidEl))
+                {
+                    var cid = cidEl.GetInt64();
+                    var ids = d.RootElement.TryGetProperty("ids", out var a) && a.ValueKind == JsonValueKind.Array
+                        ? a.EnumerateArray().Select(x => x.GetInt64()).ToArray() : Array.Empty<long>();
+                    if (type == "coladd") _db.AddToCollection(cid, ids); else _db.RemoveFromCollection(cid, ids);
+                    PushCols();
+                    _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
+                }
+                return;
+            }
+            if (type == "autotag")
+            {
+                if (d.RootElement.TryGetProperty("id", out var idEl))
+                {
+                    var gen = d.RootElement.TryGetProperty("gen", out var gg) && gg.ValueKind == JsonValueKind.Number ? gg.GetInt32() : 0;
+                    _ = HandleAutotag(idEl.GetInt64(), gen);   // heavy KNN → background (HandleDupes pattern)
+                }
+                return;
+            }
         }
         catch { /* not JSON / no type → fall through to bridge */ }
 
@@ -463,6 +535,31 @@ public sealed class MainForm : Form
         finally { _busy = false; }
     }
 
+    /// <summary>T27 Auto-Tag: backfill hashes on demand, find similar neighbors that have user tags,
+    /// and reply with vote-ranked suggestions (suggest-only — no tags are written here). Mirrors the
+    /// HandleDupes background template; the gen token lets the client drop a superseded run.</summary>
+    private async Task HandleAutotag(long id, int gen)
+    {
+        if (_busy) return;
+        _busy = true;
+        SetStatus("Finding visually similar images…");
+        var prog = new Progress<HarvestProgress>(p => SetStatus($"{p.Phase}… {p.Current:n0}/{p.Total:n0}"));
+        try
+        {
+            string reply = await Task.Run(() =>
+            {
+                using var opDb = new LibraryDb(AppPaths.LibraryDbFile);
+                opDb.BackfillPhashes(progress: prog);                 // hash the target + any neighbors on demand
+                var res = opDb.SuggestTagsByPhash(id, 3, 20);         // suggest-only KNN
+                return GalleryBridge.AutotagReply(opDb, UrlFor, id, res, gen);
+            });
+            _web.CoreWebView2?.PostWebMessageAsString(reply);
+            SetStatus($"{_db.ImageCount(includeArchived: false):n0} images.");
+        }
+        catch (Exception ex) { SetStatus("Auto-tag failed: " + ex.Message); }
+        finally { _busy = false; }
+    }
+
     private bool EnsureExportDir()
     {
         if (!string.IsNullOrEmpty(_settings.ExportDir) && Directory.Exists(_settings.ExportDir)) return true;
@@ -519,6 +616,14 @@ public sealed class MainForm : Form
     }
 
     private void SetStatus(string s) => _statusLabel.Text = s;
+
+    /// <summary>Re-send the collections list to the gallery (sidebar + action-bar picker) after a
+    /// collection mutation. Reuses the bridge's read handler so the JSON shape stays in one place.</summary>
+    private void PushCols()
+    {
+        var r = _bridge.Handle("{\"type\":\"cols\"}");
+        if (r is not null) _web.CoreWebView2?.PostWebMessageAsString(r);
+    }
 
     private void RestoreWindowBounds()
     {

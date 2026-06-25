@@ -80,6 +80,12 @@
   .cap{position:absolute;left:9px;right:9px;bottom:8px;font-size:10.5px;color:rgba(232,224,210,.92);
     text-shadow:0 1px 3px rgba(0,0,0,.8);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;z-index:2}
   .gbadge{position:absolute;top:8px;right:8px;font-size:10px;font-weight:700;padding:2px 7px;border-radius:999px;background:rgba(139,111,196,.9);color:#f0eafa;z-index:3;pointer-events:none}
+  /* per-card favorite star (top-right; distinct from the top-left .cb checkbox) */
+  .favstar{position:absolute;top:8px;right:8px;width:24px;height:24px;border-radius:50%;display:flex;
+    align-items:center;justify-content:center;font-size:15px;line-height:1;cursor:pointer;z-index:4;
+    background:rgba(12,9,16,.55);color:#6b6276;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+  .favstar:hover{color:#C7A252}
+  .favstar.on{color:#C7A252;text-shadow:0 0 10px rgba(199,162,82,.7)}
   #sentinel{height:1px}
 
   /* empty state */
@@ -145,6 +151,53 @@
   #ip-raw{margin-top:10px;white-space:pre-wrap;font-family:Consolas,monospace;font-size:11px;background:#0e0b13;border:1px solid var(--border);border-radius:8px;padding:8px;max-height:220px;overflow:auto;display:none;color:#9fe6c5}
   .ipplaceholder{margin-top:16px;padding:14px;border-radius:10px;background:var(--panel2);border:1px solid var(--border);font-size:12.5px;color:var(--mut);line-height:1.6;font-style:italic}
 
+  /* v2.0: manual tags (TAGS tab), notes editor, collection sidebar/picker */
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+  .chip{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border-radius:999px;font-size:12px;
+    background:rgba(164,255,106,.12);border:1px solid rgba(164,255,106,.32);color:#cfe9b3}
+  .chip.ro{background:rgba(139,111,196,.14);border-color:#3d2e58;color:#cdbfe8}
+  .chip .x{cursor:pointer;color:#9a90a6;font-weight:700}
+  .chip .x:hover{color:var(--red)}
+  #tagadd{width:100%;margin-top:10px;background:var(--input);border:1px solid var(--border);border-radius:8px;
+    padding:8px 11px;color:var(--bone);font-size:12.5px;outline:none;font-family:Inter,sans-serif}
+  #tagadd:focus{border-color:var(--acid)}
+  #tagac{margin-top:4px;background:#1B1622;border:1px solid var(--border);border-radius:9px;
+    overflow:auto;max-height:200px;display:none}
+  #tagac div{display:flex;justify-content:space-between;padding:6px 11px;cursor:pointer;font-size:12.5px}
+  #tagac div:hover,#tagac div.sel{background:var(--panel2)}
+  #tagac .df{color:var(--mut2)}
+  #note-edit{width:100%;min-height:170px;resize:vertical;margin-top:6px;background:#15101d;border:1px solid var(--border);
+    border-radius:9px;padding:10px 12px;color:#cdc4d6;font-size:12.5px;font-family:Inter,sans-serif;line-height:1.55;outline:none}
+  #note-edit:focus{border-color:var(--acid)}
+  #note-meta{margin-top:6px;font-size:11px;color:var(--mut2)}
+  .colnewbtn{cursor:pointer;color:#8b7ea8;font-size:11px;padding:2px 6px;border-radius:6px}
+  .colnewbtn:hover{color:var(--acid);background:rgba(255,255,255,.04)}
+  .colrow .act{display:none;gap:2px;align-items:center}
+  .colrow:hover .act{display:inline-flex}
+  .colrow .act span{cursor:pointer;color:#8b8195;font-size:11px;padding:0 3px}
+  .colrow .act span:hover{color:#ece5d6}
+  #colpick{position:absolute;bottom:66px;left:50%;transform:translateX(-50%);min-width:220px;max-height:260px;overflow:auto;
+    background:rgba(24,18,32,.98);backdrop-filter:blur(14px);border:1px solid #362a4c;border-radius:11px;
+    box-shadow:0 16px 44px rgba(0,0,0,.6);z-index:9;display:none;padding:5px 0}
+  #colpick div{padding:8px 14px;font-size:13px;color:#d8d0bf;cursor:pointer;display:flex;justify-content:space-between;gap:10px}
+  #colpick div:hover{background:rgba(91,59,140,.28)}
+  #colpick .new{color:var(--acid);border-top:1px solid #2a2236;margin-top:4px}
+  /* auto-tag suggestion modal (T27) */
+  #autotag-modal{position:fixed;inset:0;background:rgba(8,6,12,.7);z-index:55;display:none;align-items:center;justify-content:center}
+  #autotag-modal.open{display:flex}
+  .atbox{width:440px;max-width:calc(100% - 40px);max-height:80vh;overflow:auto;background:var(--panel);border:1px solid #362a4c;
+    border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.6);padding:18px 20px}
+  .athead{display:flex;align-items:center;justify-content:space-between;font-size:16px;color:#ece5d6}
+  .athead #at-close{cursor:pointer;color:#8b8195;font-size:16px}
+  .athead #at-close:hover{color:#ece5d6}
+  .atsub{font-size:12px;color:var(--mut);margin:6px 0 12px}
+  #at-suggest .chip{cursor:pointer}
+  #at-suggest .chip.added{background:rgba(199,162,82,.16);border-color:rgba(199,162,82,.45);color:#e6cf9a;cursor:default}
+  #at-neighbors{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+  .atneigh{width:72px}
+  .atneigh img{width:72px;height:60px;object-fit:cover;border-radius:8px;background:#26222e;border:1px solid var(--border);display:block}
+  .atneigh .d{font-size:10px;color:var(--mut2);text-align:center;margin-top:2px}
+
   /* right-click menu */
   #ctx{position:fixed;display:none;width:214px;padding:5px 0 6px;background:rgba(24,18,32,.97);backdrop-filter:blur(14px);
     border:1px solid #362a4c;border-radius:11px;box-shadow:0 16px 44px rgba(0,0,0,.6);z-index:61}
@@ -189,12 +242,15 @@
       <div class="navrow on" data-scope="all"><span class="l"><span class="ico">⬚</span>All Images</span><span class="cnt" id="cnt-all">—</span></div>
       <div class="navrow" data-scope="unsorted"><span class="l"><span class="ico">▢</span>Unsorted</span><span class="cnt" id="cnt-unsorted">—</span></div>
       <div class="navrow" data-scope="dupes" title="Find duplicate images"><span class="l"><span class="ico" style="color:#a98fd6">⧉</span>Duplicates</span><span class="cnt" id="cnt-dupes"></span></div>
-      <div class="navrow v2" title="Favorites arrive in v2"><span class="l"><span class="ico" style="color:#C7A252">★</span>Favorites</span><span class="v2pill">v2</span></div>
+      <div class="navrow" data-scope="favorites"><span class="l"><span class="ico" style="color:#C7A252">★</span>Favorites</span><span class="cnt" id="cnt-favorites"></span></div>
       <div class="navrow" data-scope="bog"><span class="l"><span class="ico" style="color:#d68aa0">☠</span>The Bog</span><span class="cnt" id="cnt-bog">—</span></div>
     </nav>
 
-    <div class="navhead">Collections</div>
-    <div class="v2note">Collections arrive in v2.</div>
+    <div class="navhead" style="display:flex;align-items:center;justify-content:space-between">
+      <span>Collections</span><span class="colnewbtn" id="colnew" title="New collection">＋ New</span>
+    </div>
+    <nav id="colnav"></nav>
+    <div class="v2note" id="colempty">No collections yet — ＋ New to make one.</div>
 
     <div class="navhead">Tags (Charms)</div>
     <div class="v2note">Manual charms arrive in v2 — search uses prompt tags today.</div>
@@ -236,6 +292,7 @@
       <div class="pill pill-move" data-op="move"><span style="color:#a98fd6">⮕</span> Move To…</div>
       <div class="pill pill-copy" data-op="copy"><span style="color:#C7A252">⧉</span> Copy</div>
       <div class="pill pill-opt" data-op="optimize">⛭ Optimize…</div>
+      <div class="pill pill-opt" id="pill-addcol" style="display:none">＋ Add to Collection…</div>
       <div class="sep"></div>
       <div class="pill pill-reject" data-op="archive"><span style="color:#d68aa0">☠</span> Reject <span class="k">to Bog</span></div>
       <div class="pill pill-del" data-op="delete">🗑 Delete <span class="k">Del</span></div>
@@ -243,6 +300,7 @@
       <span class="seln" id="seln">0 selected</span>
       <span class="clr" id="selclear">Clear</span>
     </div>
+    <div id="colpick"></div>
   </main>
 
   <!-- ===================== INSPECTOR ===================== -->
@@ -273,15 +331,29 @@
         <button class="ip-btn" id="ip-rawbtn" style="display:none">Raw metadata</button>
         <pre id="ip-raw"></pre>
         <div class="ip-h">Rituals (Actions)</div>
-        <div class="ipplaceholder">Auto-Tag, Find Duplicates &amp; Batch Rename are brewing for v2.</div>
+        <div class="ipplaceholder">Open the <b>TAGS</b> tab to add charms or <b>✨ Suggest tags</b> from look-alike images. Find Duplicates lives in the sidebar.</div>
       </div>
 
       <div id="tab-tags" style="display:none">
-        <div class="ipplaceholder">Manual charms (tagging) arrive in v2. Today, charms are read from each image's prompt and power the search bar &amp; autocomplete.</div>
+        <div id="tags-empty" class="ipempty">Click an image to read &amp; edit its charms.</div>
+        <div id="tags-body" style="display:none">
+          <div class="ip-h">Charms (from prompt)</div>
+          <div id="ptag-chips" class="chips"></div>
+          <div class="ip-h" style="margin-top:16px">Your Tags</div>
+          <div id="utag-chips" class="chips"></div>
+          <input id="tagadd" autocomplete="off" spellcheck="false" placeholder="Add a tag, Enter to save…" />
+          <div id="tagac"></div>
+          <button class="ip-btn" id="ip-suggest" style="margin-top:14px">✨ Suggest tags from similar images</button>
+        </div>
       </div>
 
       <div id="tab-notes" style="display:none">
-        <div class="ipplaceholder">No notes scribbled in the grimoire yet — notes arrive in v2.</div>
+        <div id="notes-empty" class="ipempty">Click an image to scribble a note in its grimoire.</div>
+        <div id="notes-body" style="display:none">
+          <div class="ip-h">Grimoire Note</div>
+          <textarea id="note-edit" maxlength="500" placeholder="Scribble a note… (saves when you click away)"></textarea>
+          <div id="note-meta"></div>
+        </div>
       </div>
     </div>
   </aside>
@@ -296,12 +368,24 @@
     <button class="lb-btn" data-copy="pos">Copy positive</button>
     <div class="lb-h">Negative</div><div id="lb-neg" class="lb-txt"></div>
     <button class="lb-btn" data-copy="neg">Copy negative</button>
+    <div class="lb-h" id="lb-noteh" style="display:none">Note</div><div id="lb-note" class="lb-txt" style="display:none"></div>
     <div class="lb-h">Grimoire</div><table class="kv" id="lb-kv"></table>
     <button class="lb-btn" data-copy="full">Copy full A1111</button>
     <button class="lb-btn" id="lb-rawbtn" style="display:none">Raw metadata</button>
     <pre id="lb-raw"></pre>
   </aside>
   <div id="lb-prev" class="lb-nav">‹</div><div id="lb-next" class="lb-nav">›</div><div id="lb-close" class="lb-nav">✕</div>
+</div>
+
+<!-- auto-tag suggestions (T27) -->
+<div id="autotag-modal">
+  <div class="atbox">
+    <div class="athead"><span class="cinzel">Suggested Charms</span><span id="at-close" title="Close">✕</span></div>
+    <div id="at-status" class="atsub"></div>
+    <div id="at-suggest" class="chips"></div>
+    <div class="ip-h" id="at-neighh" style="display:none">From similar images</div>
+    <div id="at-neighbors"></div>
+  </div>
 </div>
 
 <!-- right-click menu -->
@@ -326,24 +410,29 @@
         scroll=$('#gridwrap'),lb=$('#lb'),actionbar=$('#actionbar'),seln=$('#seln');
   const SIZE=60;
   let page=0,total=0,loading=false,exhausted=false,raw='',gen=0;
-  let scope='all';                              // all | unsorted | bog
+  let scope='all';                              // all | unsorted | bog | favorites | col
+  let currentCid=null;                          // active collection id when scope==='col' (T28)
   let acItems=[],acSel=-1;
+  let tagAcItems=[],tagAcSel=-1;                 // separate AC state for the TAGS add-input (T26)
+  let colsCache=[];                              // last {id,name,count}[] from a cols reply (T28)
   let loaded=[], cur=-1, curMeta=null, panelIdx=-1, panelMeta=null, tab='info';
   let sel=new Set(), lastIdx=-1;
   let dupeMode=false, nearDupes=false;
-  const TITLES={all:'All Images',unsorted:'Unsorted',bog:'The Bog',dupes:'Duplicates'};
+  const TITLES={all:'All Images',unsorted:'Unsorted',bog:'The Bog',dupes:'Duplicates',favorites:'Favorites'};
 
   function post(m){ if(window.chrome&&window.chrome.webview) window.chrome.webview.postMessage(JSON.stringify(m)); }
   function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-  function flags(){ if(scope==='unsorted')return{untaggedOnly:true}; if(scope==='bog')return{archivedOnly:true}; return {}; }
+  function flags(){ if(scope==='unsorted')return{untaggedOnly:true}; if(scope==='bog')return{archivedOnly:true};
+    if(scope==='favorites')return{favoritesOnly:true}; if(scope==='col')return{collectionId:currentCid}; return {}; }
   function resetGrid(){ gen++; loading=false; grid.innerHTML=''; loaded=[]; page=0; total=0; exhausted=false; clearSel(); emptyMsg.style.display='none'; panelIdx=-1; showPanelEmpty(); }
   function requestPage(){ if(loading||exhausted)return; loading=true; post({type:'query',raw,page,size:SIZE,gen,...flags()}); }
   function refresh(){ resetGrid(); requestPage(); post({type:'counts'}); }
 
   // ---- sidebar nav ----
   document.querySelectorAll('#libnav .navrow[data-scope]').forEach(row=>row.onclick=()=>{
-    scope=row.dataset.scope;
+    scope=row.dataset.scope; currentCid=null;
     document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.toggle('on',r===row));
+    document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.remove('on'));   // clear collection highlight
     $('#viewtitle').textContent=TITLES[scope]||'All Images';
     if(scope==='dupes'){ $('#dupctl').style.display='flex'; runDupes(); }
     else { dupeMode=false; $('#dupctl').style.display='none'; $('#cnt-dupes').textContent=''; refresh(); }
@@ -388,7 +477,8 @@
 
   // ---- selection ----
   function clearSel(){ sel.clear(); lastIdx=-1; document.querySelectorAll('.card.sel').forEach(c=>c.classList.remove('sel')); updateBar(); }
-  function updateBar(){ seln.textContent=sel.size+' selected'; actionbar.style.display=sel.size>0?'flex':'none'; }
+  function updateBar(){ seln.textContent=sel.size+' selected'; actionbar.style.display=sel.size>0?'flex':'none';
+    $('#pill-addcol').style.display=(sel.size>0&&colsCache.length>0)?'flex':'none'; if(!sel.size) hideColPick(); }
   function paintCard(idx){ const card=grid.querySelector('.card[data-idx="'+idx+'"]'); if(card) card.classList.toggle('sel',sel.has(loaded[idx].id)); }
   function selectClick(idx,e){ const id=loaded[idx].id;
     if(e.shiftKey&&lastIdx>=0){ const [a,b]=[Math.min(lastIdx,idx),Math.max(lastIdx,idx)]; for(let i=a;i<=b;i++){sel.add(loaded[i].id);paintCard(i);} }
@@ -399,6 +489,9 @@
   document.querySelectorAll('#actionbar .pill[data-op]').forEach(b=>b.onclick=()=>doOp(b.dataset.op));
   $('#selclear').onclick=clearSel;
   function doOp(op){ if(!sel.size)return; post({type:'op',op,ids:[...sel]}); }
+  // Add-to-collection pill (NOT data-op, so the loop above skips it) + sidebar "＋ New".
+  $('#pill-addcol').onclick=(e)=>{ e.stopPropagation(); openColPicker(); };
+  $('#colnew').onclick=()=>{ const n=(prompt('New collection name:')||'').trim(); if(n) post({type:'colcreate',name:n}); };
 
   // ---- right-click menu ----
   const ctx=$('#ctx'); let ctxIdx=-1;
@@ -429,6 +522,10 @@
     const cb=document.createElement('div'); cb.className='cb'; cb.innerHTML='✓'; c.appendChild(cb);
     const cap=document.createElement('div'); cap.className='cap'; cap.textContent=it.name; c.appendChild(cap);
     if(it.group){ const gb=document.createElement('div'); gb.className='gbadge'; gb.textContent='#'+it.group; c.appendChild(gb); }
+    const star=document.createElement('div'); star.className='favstar'+(it.favorite?' on':''); star.innerHTML='★'; star.title='Favorite';
+    if(it.group) star.style.top='36px';   // sit below the group #badge in dupes view
+    star.onclick=(e)=>{ e.stopPropagation(); const on=!star.classList.contains('on'); star.classList.toggle('on',on); it.favorite=on; post({type:'fav',id:it.id,on}); };
+    c.appendChild(star);
     c.onclick=(e)=>selectClick(idx,e);
     c.ondblclick=()=>openLb(idx);
     c.oncontextmenu=(e)=>{ e.preventDefault(); if(!sel.has(it.id)){ /* right-click a non-selected card targets just it */ } showCtx(e.clientX,e.clientY,idx); };
@@ -443,6 +540,7 @@
     $('#lb-name').textContent=m.fileName||((m.source||m.format||'')+' · '+(m.width||'?')+'×'+(m.height||'?'));
     $('#lb-meta').textContent='image '+(cur+1)+' of '+loaded.length;
     $('#lb-pos').textContent=m.positive||'(none)'; $('#lb-neg').textContent=m.negative||'(none)';
+    { const has=!!(m.note&&m.note.trim()); $('#lb-noteh').style.display=has?'block':'none'; $('#lb-note').style.display=has?'block':'none'; $('#lb-note').textContent=m.note||''; }
     const kv=$('#lb-kv'); kv.innerHTML='';
     [['Model',m.model],['Sampler',m.sampler],['Steps',m.steps],['CFG',m.cfg],['Seed',m.seed]].forEach(([k,v])=>{
       if(v===null||v===undefined||v==='')return; const tr=document.createElement('tr');
@@ -465,14 +563,16 @@
     $('#tab-info').style.display=(tab==='info'&&panelMeta)?'block':'none';
     $('#tab-tags').style.display=tab==='tags'?'block':'none';
     $('#tab-notes').style.display=tab==='notes'?'block':'none';
-    $('#ip-empty').style.display=(tab==='info'&&!panelMeta)?'block':'none'; });
+    $('#ip-empty').style.display=(tab==='info'&&!panelMeta)?'block':'none';
+    syncTagsNotes(); });
   function showPanelEmpty(){ panelMeta=null; $('#tab-info').style.display='none';
-    $('#ip-empty').style.display=(tab==='info')?'block':'none'; }
+    $('#ip-empty').style.display=(tab==='info')?'block':'none'; syncTagsNotes(); }
   function fmtSize(b){ if(!b)return''; const u=['B','KB','MB','GB']; let i=0,n=b; while(n>=1024&&i<3){n/=1024;i++;} return n.toFixed(n<10&&i>0?1:0)+' '+u[i]; }
   function showPanel(m){ panelMeta=m;
     $('#ip-empty').style.display='none';
     $('#tab-tags').style.display=tab==='tags'?'block':'none'; $('#tab-notes').style.display=tab==='notes'?'block':'none';
     $('#tab-info').style.display=tab==='info'?'block':'none';
+    renderTags(m); renderNote(m); syncTagsNotes();   // hydrate TAGS (T26) + NOTES (T25) from the inspect reply
     $('#ip-pic').src='https://thumb.local/'+m.id;
     $('#ip-name').textContent=m.fileName||('image '+m.id);
     const bits=[ (m.width&&m.height)?(m.width+'×'+m.height):null, fmtSize(m.sizeBytes), (m.format||'').toUpperCase()||null ].filter(Boolean);
@@ -490,6 +590,97 @@
   document.querySelectorAll('[data-ipcopy]').forEach(b=>b.onclick=()=>{ if(!panelMeta)return; post({type:'copy',text:buildCopy(panelMeta,b.dataset.ipcopy)});
     b.classList.add('done'); const o=b.textContent; b.textContent='✓ Copied'; setTimeout(()=>{b.classList.remove('done');b.textContent=o;},1300); });
   $('#ip-open').onclick=()=>{ if(panelIdx>=0) openLb(panelIdx); };
+
+  // ---- v2.0: notes (T25) + manual tags (T26) + collections (T28) ----
+  function syncTagsNotes(){ const has=!!panelMeta;
+    $('#tags-empty').style.display=has?'none':'block'; $('#tags-body').style.display=has?'block':'none';
+    $('#notes-empty').style.display=has?'none':'block'; $('#notes-body').style.display=has?'block':'none'; }
+  function chip(text,removable,onx){ const c=document.createElement('span'); c.className='chip'+(removable?'':' ro');
+    const t=document.createElement('span'); t.textContent=text; c.appendChild(t);
+    if(removable){ const x=document.createElement('span'); x.className='x'; x.textContent='✕'; x.onclick=onx; c.appendChild(x); } return c; }
+  function renderTags(m){ const pc=$('#ptag-chips'), uc=$('#utag-chips'); pc.innerHTML=''; uc.innerHTML='';
+    (m.promptTags||[]).forEach(t=>pc.appendChild(chip(t,false)));
+    if(!(m.promptTags||[]).length) pc.innerHTML='<span class="ipempty" style="padding:4px 0">No prompt charms.</span>';
+    (m.userTags||[]).forEach(t=>uc.appendChild(chip(t,true,()=>{ if(panelMeta) post({type:'tagdel',id:panelMeta.id,token:t}); }))); }
+  function renderNote(m){ $('#note-edit').value=m.note||'';
+    $('#note-meta').textContent=m.noteUpdatedAt?('Last edited '+m.noteUpdatedAt.replace('T',' ')):(m.note?'':'Not yet noted.'); }
+  $('#note-edit').addEventListener('blur',()=>{ if(panelMeta) post({type:'note',id:panelMeta.id,body:$('#note-edit').value}); });
+
+  // TAGS add-input: autocomplete (acTarget='tags') + commit on Enter; separate from the search AC.
+  const tagAdd=$('#tagadd'), tagAc=$('#tagac'); let tagAcTimer=null;
+  tagAdd.addEventListener('input',()=>{ clearTimeout(tagAcTimer); const t=tagAdd.value.trim();
+    tagAcTimer=setTimeout(()=>{ if(t.length>0) post({type:'ac',prefix:t,acTarget:'tags'}); else hideTagAc(); },75); });
+  tagAdd.addEventListener('keydown',e=>{
+    if(tagAc.style.display==='block'&&tagAcItems.length){
+      if(e.key==='ArrowDown'){tagAcSel=(tagAcSel+1)%tagAcItems.length;paintTagAc();e.preventDefault();return;}
+      if(e.key==='ArrowUp'){tagAcSel=(tagAcSel-1+tagAcItems.length)%tagAcItems.length;paintTagAc();e.preventDefault();return;}
+      if(e.key==='Tab'){applyTagAc(tagAcSel<0?0:tagAcSel);e.preventDefault();return;} }
+    if(e.key==='Enter'){ commitTag(tagAdd.value); e.preventDefault(); }
+    else if(e.key==='Escape'){ hideTagAc(); } });
+  function commitTag(text){ text=(text||'').trim(); if(!text||!panelMeta)return; post({type:'tagadd',id:panelMeta.id,text}); tagAdd.value=''; hideTagAc(); }
+  function paintTagAc(){ tagAc.innerHTML=''; tagAcItems.forEach((it,i)=>{ const d=document.createElement('div'); if(i===tagAcSel)d.className='sel';
+    d.innerHTML='<span>'+esc(it.token)+'</span><span class="df">'+it.df+'</span>'; d.onclick=()=>applyTagAc(i); tagAc.appendChild(d); });
+    tagAc.style.display=tagAcItems.length?'block':'none'; }
+  function applyTagAc(i){ if(i>=0&&i<tagAcItems.length) commitTag(tagAcItems[i].token); }
+  function hideTagAc(){ tagAc.style.display='none'; tagAcItems=[]; tagAcSel=-1; }
+
+  // ---- collections sidebar + action-bar picker ----
+  const colpick=$('#colpick');
+  function renderColNav(items){ colsCache=items||[]; const nav=$('#colnav'); nav.innerHTML='';
+    $('#colempty').style.display=colsCache.length?'none':'block';
+    // active collection deleted out from under us → fall back to All
+    if(scope==='col' && !colsCache.some(c=>c.id===currentCid)){ scope='all'; currentCid=null;
+      document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.toggle('on',r.dataset.scope==='all'));
+      $('#viewtitle').textContent='All Images'; refresh(); }
+    colsCache.forEach(c=>{ const row=document.createElement('div');
+      row.className='navrow colrow'+(scope==='col'&&c.id===currentCid?' on':''); row.dataset.cid=c.id;
+      row.innerHTML='<span class="l"><span class="ico" style="color:#a98fd6">▤</span>'+esc(c.name)+'</span>';
+      const right=document.createElement('span'); right.style.cssText='display:flex;align-items:center;gap:4px';
+      const act=document.createElement('span'); act.className='act';
+      const ed=document.createElement('span'); ed.textContent='✎'; ed.title='Rename';
+      ed.onclick=(e)=>{ e.stopPropagation(); const n=(prompt('Rename collection:',c.name)||'').trim(); if(n&&n!==c.name) post({type:'colrename',id:c.id,name:n}); };
+      const del=document.createElement('span'); del.textContent='🗑'; del.title='Delete';
+      del.onclick=(e)=>{ e.stopPropagation(); if(confirm('Delete collection “'+c.name+'”? (the images are not deleted)')) post({type:'coldelete',id:c.id}); };
+      act.appendChild(ed); act.appendChild(del);
+      const cnt=document.createElement('span'); cnt.className='cnt'; cnt.textContent=c.count;
+      right.appendChild(act); right.appendChild(cnt); row.appendChild(right);
+      row.onclick=()=>{ scope='col'; currentCid=c.id; dupeMode=false; $('#dupctl').style.display='none'; $('#cnt-dupes').textContent='';
+        document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.remove('on'));
+        document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.toggle('on',r===row));
+        $('#viewtitle').textContent=c.name; refresh(); };
+      nav.appendChild(row); });
+    if(sel.size) updateBar();   // the Add-to-collection pill depends on colsCache being non-empty
+  }
+  function openColPicker(){ if(!sel.size||!colsCache.length){ hideColPick(); return; }
+    colpick.innerHTML=''; colsCache.forEach(c=>{ const d=document.createElement('div');
+      d.innerHTML='<span>'+esc(c.name)+'</span><span class="df" style="color:var(--mut2)">'+c.count+'</span>';
+      d.onclick=()=>{ post({type:'coladd',collectionId:c.id,ids:[...sel]}); hideColPick(); }; colpick.appendChild(d); });
+    const nw=document.createElement('div'); nw.className='new'; nw.textContent='＋ New collection…';
+    nw.onclick=()=>{ const n=(prompt('New collection name:')||'').trim(); if(n) post({type:'colcreate',name:n}); hideColPick(); }; colpick.appendChild(nw);
+    colpick.style.display='block'; }
+  function hideColPick(){ colpick.style.display='none'; }
+  document.addEventListener('click',(e)=>{ if(colpick.style.display==='block' && !colpick.contains(e.target) && e.target.id!=='pill-addcol') hideColPick(); });
+
+  // ---- auto-tag (T27): suggest-only, gen-guarded modal ----
+  let atGen=0, atTargetId=null; const atModal=$('#autotag-modal');
+  $('#ip-suggest').onclick=()=>{ if(!panelMeta)return; atTargetId=panelMeta.id; atGen++;
+    $('#at-status').textContent='Searching for visually similar images…'; $('#at-suggest').innerHTML=''; $('#at-neighbors').innerHTML=''; $('#at-neighh').style.display='none';
+    atModal.classList.add('open'); post({type:'autotag',id:atTargetId,gen:atGen}); };
+  $('#at-close').onclick=()=>atModal.classList.remove('open');
+  atModal.addEventListener('click',e=>{ if(e.target===atModal) atModal.classList.remove('open'); });
+  function renderAutotag(m){ const sug=$('#at-suggest'), nb=$('#at-neighbors'); sug.innerHTML=''; nb.innerHTML='';
+    const items=m.suggestions||[], neigh=m.neighbors||[];
+    $('#at-status').textContent = items.length ? 'Tap a charm to add it to this image:'
+      : (neigh.length ? 'No new tags to suggest — similar images share your existing charms.' : 'No visually similar tagged images found.');
+    items.forEach(s=>{ const c=document.createElement('span'); c.className='chip'; c.title=s.votes+' similar image'+(s.votes===1?'':'s');
+      const t=document.createElement('span'); t.textContent='＋ '+s.token; c.appendChild(t);
+      const v=document.createElement('span'); v.className='df'; v.style.color='var(--mut2)'; v.textContent=s.votes; c.appendChild(v);
+      c.onclick=()=>{ if(c.classList.contains('added')||!atTargetId)return; post({type:'tagadd',id:atTargetId,text:s.token}); c.classList.add('added'); t.textContent='✓ '+s.token; };
+      sug.appendChild(c); });
+    $('#at-neighh').style.display=neigh.length?'block':'none';
+    neigh.forEach(n=>{ const d=document.createElement('div'); d.className='atneigh';
+      const img=document.createElement('img'); img.loading='lazy'; img.src='https://thumb.local/'+n.id; img.onerror=()=>{img.src=n.url;};
+      d.appendChild(img); const cap=document.createElement('div'); cap.className='d'; cap.textContent='Δ'+n.distance; d.appendChild(cap); nb.appendChild(d); }); }
 
   // ---- keyboard ----
   document.addEventListener('keydown',e=>{
@@ -515,8 +706,13 @@
       if(!m.items||m.items.length<SIZE)exhausted=true;
       countEl.textContent=total.toLocaleString()+' item'+(total===1?'':'s');
       if(total===0) showEmpty(); else emptyMsg.style.display='none'; }
-    else if(m.type==='ac'){ acItems=(m.items||[]).slice(0,8); acSel=-1; paintAc(); }
-    else if(m.type==='counts'){ $('#cnt-all').textContent=(m.all||0).toLocaleString(); $('#cnt-unsorted').textContent=(m.unsorted||0).toLocaleString(); $('#cnt-bog').textContent=(m.bog||0).toLocaleString(); }
+    else if(m.type==='ac'){ if(m.acTarget==='tags'){ tagAcItems=(m.items||[]).slice(0,8); tagAcSel=-1; paintTagAc(); }
+      else { acItems=(m.items||[]).slice(0,8); acSel=-1; paintAc(); } }
+    else if(m.type==='counts'){ $('#cnt-all').textContent=(m.all||0).toLocaleString(); $('#cnt-unsorted').textContent=(m.unsorted||0).toLocaleString(); $('#cnt-bog').textContent=(m.bog||0).toLocaleString();
+      $('#cnt-favorites').textContent=(m.favorites||0)>0?(m.favorites).toLocaleString():''; }   // shown only when >0
+    else if(m.type==='tags'){ if(panelMeta&&panelMeta.id===m.id){ panelMeta.promptTags=m.prompt; panelMeta.userTags=m.user; renderTags(panelMeta); } }
+    else if(m.type==='cols'){ renderColNav(m.items||[]); }
+    else if(m.type==='autotag'){ if(m.gen!==undefined && m.gen!==atGen) return; renderAutotag(m); }   // drop a superseded run
     else if(m.type==='dupes'){ if(m.gen!==undefined && m.gen!==gen) return;   // drop a superseded dupes scan
       loading=false; dupeMode=true; total=m.total; addCards(m.items||[]);
       $('#cnt-dupes').textContent = m.groups>0 ? m.groups.toLocaleString() : '0';
@@ -528,7 +724,7 @@
     else if(m.type==='status'){ countEl.textContent=m.text; } });
 
   new IntersectionObserver(es=>{ if(es[0].isIntersecting) requestPage(); },{root:scroll,rootMargin:'400px'}).observe($('#sentinel'));
-  requestPage(); post({type:'counts'});
+  requestPage(); post({type:'counts'}); post({type:'cols'});   // T28: populate the sidebar Collections section
 })();
 </script>
 </body>

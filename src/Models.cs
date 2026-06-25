@@ -41,6 +41,21 @@ public sealed class ImageRow
 
     /// <summary>Prompt-derived tokens for this image (drives image_tags + tag_freq).</summary>
     public List<string> Tags { get; set; } = new();
+
+    /// <summary>Per-image favorite star (v3 images.favorite). Excluded from UpsertCore (pure user
+    /// intent) so a rescan keeps it; mapped by name in MapRow.</summary>
+    public bool Favorite { get; set; }
+}
+
+/// <summary>One auto-tag suggestion: a candidate token + how many similar images carry it (T27).</summary>
+public sealed record AutotagSuggestion(string Token, int Votes);
+
+/// <summary>Result of a suggest-only KNN auto-tag run (T27): vote-ranked candidate tokens + the
+/// visually-similar neighbors they came from. Producing this writes nothing (suggest-only).</summary>
+public sealed class AutotagResult
+{
+    public List<(long Id, int Distance)> Neighbors { get; set; } = new();
+    public List<AutotagSuggestion> Suggestions { get; set; } = new();
 }
 
 /// <summary>Progress tick for long operations (scan / file ops), surfaced to the status bar.

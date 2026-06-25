@@ -35,6 +35,12 @@ public sealed class GalleryBridge
                 "ac" => HandleAutocomplete(root),
                 "inspect" => HandleInspect(root),
                 "counts" => HandleCounts(),
+                // These synchronously RETURN a reply, so they're answered here (not host-side in
+                // MainForm). Manual-tag add/del + the collections read. fav/note/col-writes are
+                // intercepted in MainForm because they push {type:'reload'} / are silent.
+                "tagadd" => HandleTagAdd(root),
+                "tagdel" => HandleTagDel(root),
+                "cols" => HandleCols(),
                 _ => null
             };
         }
@@ -49,17 +55,20 @@ public sealed class GalleryBridge
         var includeArchived = root.TryGetProperty("includeArchived", out var ia) && ia.ValueKind == JsonValueKind.True;
         var untaggedOnly = root.TryGetProperty("untaggedOnly", out var uo) && uo.ValueKind == JsonValueKind.True;
         var archivedOnly = root.TryGetProperty("archivedOnly", out var ao) && ao.ValueKind == JsonValueKind.True;
+        var favoritesOnly = root.TryGetProperty("favoritesOnly", out var fo) && fo.ValueKind == JsonValueKind.True;
+        long? collectionId = root.TryGetProperty("collectionId", out var ci) && ci.ValueKind == JsonValueKind.Number ? ci.GetInt64() : (long?)null;
         // Generation token: the page echoes it so the client can drop replies from a superseded query.
         var gen = root.TryGetProperty("gen", out var g) && g.ValueKind == JsonValueKind.Number ? g.GetInt32() : 0;
 
-        var (rows, total) = _db.Query(SearchParser.Parse(raw), page, size, includeArchived, untaggedOnly, archivedOnly);
+        var (rows, total) = _db.Query(SearchParser.Parse(raw), page, size, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId);
         var items = rows.Select(x => new
         {
             id = x.Id,
             url = _urlFor(x),
             fileName = x.FileName,
             format = x.MetaFormat,
-            prompt = x.Prompt
+            prompt = x.Prompt,
+            favorite = x.Favorite
         });
         return JsonSerializer.Serialize(new { type = "page", page, total, gen, items }, Json);
     }
@@ -70,14 +79,46 @@ public sealed class GalleryBridge
         long all = _db.ImageCount(includeArchived: false);
         long bog = _db.ImageCount(includeArchived: true) - all;
         long unsorted = _db.UntaggedCount();
-        return JsonSerializer.Serialize(new { type = "counts", all, unsorted, bog }, Json);
+        long favorites = _db.FavoriteCount();
+        return JsonSerializer.Serialize(new { type = "counts", all, unsorted, bog, favorites }, Json);
     }
 
     private string HandleAutocomplete(JsonElement root)
     {
         var prefix = root.TryGetProperty("prefix", out var p) ? p.GetString() ?? "" : "";
+        // acTarget routes the reply client-side (search box vs the TAGS add-input); echoed unchanged.
+        var acTarget = root.TryGetProperty("acTarget", out var at) ? at.GetString() ?? "search" : "search";
         var items = _db.TopTags(prefix, 8).Select(x => new { token = x.Token, df = x.Df });
-        return JsonSerializer.Serialize(new { type = "ac", items }, Json);
+        return JsonSerializer.Serialize(new { type = "ac", acTarget, items }, Json);
+    }
+
+    // -- Manual tags (T26): write then return the refreshed {type:'tags',id,prompt[],user[]} reply. --
+    private string? HandleTagAdd(JsonElement root)
+    {
+        if (!root.TryGetProperty("id", out var idEl)) return null;
+        var id = idEl.GetInt64();
+        var text = root.TryGetProperty("text", out var tx) ? tx.GetString() ?? "" : "";
+        _db.AddUserTags(id, text);            // TokenSet-normalized inside (R9 consistency); 0..N tokens
+        return BuildTagsReply(id);
+    }
+
+    private string? HandleTagDel(JsonElement root)
+    {
+        if (!root.TryGetProperty("id", out var idEl)) return null;
+        var id = idEl.GetInt64();
+        var token = root.TryGetProperty("token", out var tk) ? tk.GetString() ?? "" : "";
+        if (token.Length > 0) _db.RemoveUserTag(id, token);
+        return BuildTagsReply(id);
+    }
+
+    private string BuildTagsReply(long id) =>
+        JsonSerializer.Serialize(new { type = "tags", id, prompt = _db.PromptTagsFor(id), user = _db.UserTagsFor(id) }, Json);
+
+    // -- Collections read (T28): the list for the sidebar + action-bar picker. Writes are host-side. --
+    private string HandleCols()
+    {
+        var items = _db.ListCollections().Select(c => new { id = c.Id, name = c.Name, count = c.Count });
+        return JsonSerializer.Serialize(new { type = "cols", items }, Json);
     }
 
     private string? HandleInspect(JsonElement root)
@@ -105,6 +146,9 @@ public sealed class GalleryBridge
 
         var target = root.TryGetProperty("target", out var tg) ? tg.GetString() ?? "panel" : "panel";
 
+        // v2.0: the inspect reply is the read path for the NOTES tab (T25) and the TAGS tab (T26).
+        var note = _db.GetNote(row.Id);
+
         return JsonSerializer.Serialize(new
         {
             type = "inspect",
@@ -120,7 +164,11 @@ public sealed class GalleryBridge
             loras = ExtractLoras(row.Prompt),
             width = row.Width, height = row.Height,
             sizeBytes = row.SizeBytes,
-            folder = row.SourceRoot
+            folder = row.SourceRoot,
+            note = note?.Body,                    // T25 — null when no note (lightbox hides it)
+            noteUpdatedAt = note?.UpdatedAt,
+            promptTags = _db.PromptTagsFor(row.Id),  // T26 — read-only Charms
+            userTags = _db.UserTagsFor(row.Id)       // T26 — removable manual tags
         }, Json);
     }
 
@@ -145,6 +193,20 @@ public sealed class GalleryBridge
                 });
             }
         return JsonSerializer.Serialize(new { type = "dupes", gen, groups = groups.Count, total = items.Count, items }, Json);
+    }
+
+    /// <summary>Build the 'autotag' reply (T27): vote-ranked suggestions + the similar neighbors
+    /// (as thumbnail items with their Hamming distance). gen-echoed so stale runs are dropped.</summary>
+    public static string AutotagReply(LibraryDb db, Func<ImageRow, string> urlFor, long id, AutotagResult res, int gen)
+    {
+        var neighbors = new List<object>();
+        foreach (var n in res.Neighbors)
+        {
+            var row = db.GetById(n.Id);
+            if (row is not null) neighbors.Add(new { id = row.Id, url = urlFor(row), fileName = row.FileName, distance = n.Distance });
+        }
+        var suggestions = res.Suggestions.Select(s => new { token = s.Token, votes = s.Votes });
+        return JsonSerializer.Serialize(new { type = "autotag", gen, id, suggestions, neighbors }, Json);
     }
 
     private static readonly Regex LoraRx =

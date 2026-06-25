@@ -15,8 +15,12 @@ namespace TheTagHag;
 public sealed class LibraryDb : IDisposable
 {
     /// <summary>Bump when the schema changes; Migrate() upgrades older databases.
-    /// v2 adds images.phash (perceptual hash) for Find Duplicates.</summary>
-    public const int SchemaVersion = 2;
+    /// v2 adds images.phash (perceptual hash) for Find Duplicates.
+    /// v3 (additive, v2.0) adds images.favorite + tables image_notes, user_tags
+    /// (+user_tag_freq +triggers), collections and collection_items for
+    /// Favorites / Notes / Manual-Tagging / Collections. All v2.0 user state lives in
+    /// separate tables/columns that UpsertCore never touches, so a rescan can't wipe it.</summary>
+    public const int SchemaVersion = 3;
 
     private readonly SqliteConnection _con;
 
@@ -48,10 +52,12 @@ CREATE TABLE IF NOT EXISTS images (
   archived INTEGER NOT NULL DEFAULT 0,
   scanned_at TEXT NOT NULL,
   phash INTEGER,
+  favorite INTEGER NOT NULL DEFAULT 0,
   UNIQUE(abs_path)
 );
 CREATE INDEX IF NOT EXISTS ix_images_archived ON images(archived);
-CREATE INDEX IF NOT EXISTS ix_images_phash ON images(phash);
+-- ix_images_phash + ix_images_favorite are built in Migrate(), NOT here: their columns (phash @ v2,
+-- favorite @ v3) may arrive via ALTER on an older DB, and don't exist yet when EnsureSchema runs.
 
 CREATE TABLE IF NOT EXISTS image_tags (
   image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
@@ -87,25 +93,91 @@ END;
 CREATE TRIGGER IF NOT EXISTS tags_ad AFTER DELETE ON image_tags BEGIN
   UPDATE tag_freq SET df = df - 1 WHERE token = old.token;
   DELETE FROM tag_freq WHERE token = old.token AND df <= 0;
-END;");
+END;
+
+-- ===== v3 (additive) — Favorites / Notes / Manual-Tags / Collections =====
+-- NOTE: images.favorite is declared INLINE in the images CREATE above (so fresh DBs are born
+-- with it) and ALTERed in for existing DBs by Migrate(). Its index ix_images_favorite is built
+-- in Migrate() (NOT here): on an existing v2 DB the column does not exist yet when EnsureSchema
+-- runs, so referencing images(favorite) here would fail 'no such column'.
+
+-- Per-image free-text note (0..1 per image; one row per image, upserted on image_id).
+CREATE TABLE IF NOT EXISTS image_notes (
+  image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+  body TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
+
+-- Manual ('Your') tags: a SEPARATE table from image_tags so a rescan (which fully replaces
+-- image_tags in UpsertCore) never wipes them. Blended into search via a query-time UNION.
+CREATE TABLE IF NOT EXISTS user_tags (
+  image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+  token TEXT NOT NULL,
+  PRIMARY KEY (image_id, token)
+);
+CREATE INDEX IF NOT EXISTS ix_user_tags_token ON user_tags(token);
+
+-- Frequency matrix for user_tags (mirrors tag_freq) — feeds blended autocomplete.
+CREATE TABLE IF NOT EXISTS user_tag_freq ( token TEXT PRIMARY KEY, df INTEGER NOT NULL );
+
+-- user_tag_freq maintained incrementally from user_tags (cloned from tags_ai/tags_ad).
+-- user_tags + user_tag_freq are created ABOVE before these triggers reference them.
+CREATE TRIGGER IF NOT EXISTS utags_ai AFTER INSERT ON user_tags BEGIN
+  INSERT INTO user_tag_freq(token, df) VALUES (new.token, 1)
+    ON CONFLICT(token) DO UPDATE SET df = df + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS utags_ad AFTER DELETE ON user_tags BEGIN
+  UPDATE user_tag_freq SET df = df - 1 WHERE token = old.token;
+  DELETE FROM user_tag_freq WHERE token = old.token AND df <= 0;
+END;
+
+-- Named collections (many-to-many groups). Case-insensitive unique names.
+CREATE TABLE IF NOT EXISTS collections (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  UNIQUE(name COLLATE NOCASE)
+);
+
+-- Collection membership. Double ON DELETE CASCADE keeps it orphan-free when either the
+-- collection or the image is removed. INSERT OR IGNORE on the PK makes re-adds idempotent.
+CREATE TABLE IF NOT EXISTS collection_items (
+  collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+  image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+  PRIMARY KEY (collection_id, image_id)
+);
+CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_id);");
     }
 
     private void Migrate()
     {
+        // current is null on a fresh DB — EnsureSchema already created the full current shape
+        // (incl. images.favorite and the v3 tables). Existing DBs run the additive branches below;
+        // each only does what EnsureSchema's CREATE … IF NOT EXISTS cannot — add a COLUMN to an
+        // existing table (SQLite can't add columns via CREATE TABLE IF NOT EXISTS).
         var current = GetMetaInt("schema_version");
-        if (current is null)
+        if (current is not null)
         {
-            // Fresh DB — EnsureSchema already created the current shape (incl. phash).
-            SetMeta("schema_version", SchemaVersion.ToString());
-            return;
+            // v1 → v2: add the perceptual-hash column to existing databases.
+            if (current < 2 && !ColumnExists("images", "phash"))
+                Exec("ALTER TABLE images ADD COLUMN phash INTEGER;");
+            // v2 → v3: add the favorite flag. The new v3 TABLES/indexes/triggers (image_notes,
+            // user_tags(+freq+triggers), collections, collection_items) are already created by
+            // EnsureSchema; only this existing-table COLUMN needs an ALTER. ADD COLUMN with a
+            // constant DEFAULT is a metadata-only change in SQLite — instant even on a 100k DB,
+            // and every existing row reads back as 0.
+            if (current < 3 && !ColumnExists("images", "favorite"))
+                Exec("ALTER TABLE images ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;");
         }
-        // v1 → v2: add the perceptual-hash column to existing databases.
-        if (current < 2)
-        {
-            if (!ColumnExists("images", "phash")) Exec("ALTER TABLE images ADD COLUMN phash INTEGER;");
-            Exec("CREATE INDEX IF NOT EXISTS ix_images_phash ON images(phash);");
-        }
-        if (current < SchemaVersion)
+
+        // Indexes over columns that arrive via ALTER (phash @ v2, favorite @ v3) live HERE, not in
+        // EnsureSchema: EnsureSchema runs FIRST, and on an older DB the column doesn't exist yet, so
+        // a CREATE INDEX … ON images(<col>) there throws 'no such column' and crashes the open. By
+        // this point the column is guaranteed present on every path (fresh: born in EnsureSchema;
+        // upgraded: ALTERed just above). Both are idempotent (IF NOT EXISTS).
+        Exec("CREATE INDEX IF NOT EXISTS ix_images_phash ON images(phash);");
+        Exec("CREATE INDEX IF NOT EXISTS ix_images_favorite ON images(favorite);");
+
+        if (current is null || current < SchemaVersion)
             SetMeta("schema_version", SchemaVersion.ToString());
     }
 
@@ -139,6 +211,11 @@ END;");
 
     private void UpsertCore(ImageRow r)
     {
+        // v3 LOAD-BEARING INVARIANT: 'favorite' and all v2.0 user state (image_notes, user_tags,
+        // collection_items) are deliberately ABSENT from the UPDATE/INSERT column lists below and
+        // from BindImage. A rescan rewrites only scanned facts + image_tags; user intent must
+        // survive untouched (UPDATE leaves favorite as-is; INSERT lets it default to 0). phash IS
+        // bound here — it's recomputed from pixels, not user-entered. Do NOT add favorite here.
         var existingId = FindIdByAbsPath(r.AbsPath);
         if (existingId is long id)
         {
@@ -280,7 +357,7 @@ END;");
     /// Search: comma-AND tokens (image_tags join + HAVING COUNT(DISTINCT)=N) plus one
     /// prompt LIKE per quoted phrase, plus the archived filter. Returns a page + total count.
     /// </summary>
-    public (IReadOnlyList<ImageRow> Page, int Total) Query(SearchFilter f, int page, int size, bool includeArchived, bool untaggedOnly = false, bool archivedOnly = false)
+    public (IReadOnlyList<ImageRow> Page, int Total) Query(SearchFilter f, int page, int size, bool includeArchived, bool untaggedOnly = false, bool archivedOnly = false, bool favoritesOnly = false, long? collectionId = null)
     {
         var where = new List<string>();
         var ps = new List<(string, object)>();
@@ -288,6 +365,14 @@ END;");
         else if (!includeArchived) where.Add("i.archived=0");
         // "Untagged only": images the parser found no tags for (metadata-free, or prompt all-stopwords).
         if (untaggedOnly) where.Add("i.id NOT IN (SELECT image_id FROM image_tags)");
+        // v2.0 scope filters — folded into the SAME where list so they apply in BOTH the token and
+        // no-token branches AND the COUNT (one fromWhere → page==total, no desync).
+        if (favoritesOnly) where.Add("i.favorite=1");                                  // Favorites view (T24)
+        if (collectionId is long cid)                                                  // Collection view (T28)
+        {
+            where.Add("i.id IN (SELECT image_id FROM collection_items WHERE collection_id=$cid)");
+            ps.Add(("$cid", cid));
+        }
         for (int k = 0; k < f.Phrases.Count; k++)
         {
             where.Add($"i.prompt LIKE $ph{k} ESCAPE '\\'");
@@ -301,7 +386,10 @@ END;");
             for (int k = 0; k < f.Tokens.Count; k++) { inNames.Add($"$t{k}"); ps.Add(($"$t{k}", f.Tokens[k])); }
             var extra = where.Count > 0 ? " AND " + string.Join(" AND ", where) : "";
             ps.Add(("$tcount", f.Tokens.Count));
-            fromWhere = $"FROM images i JOIN image_tags t ON t.image_id=i.id " +
+            // UNION (not ALL) of prompt tags + manual user tags: a token in both counts once, so the
+            // comma-AND arity (HAVING COUNT(DISTINCT)=N) is preserved while manual tags join search (T26).
+            fromWhere = $"FROM images i JOIN (SELECT image_id, token FROM image_tags " +
+                        $"UNION SELECT image_id, token FROM user_tags) t ON t.image_id=i.id " +
                         $"WHERE t.token IN ({string.Join(",", inNames)}){extra} " +
                         $"GROUP BY i.id HAVING COUNT(DISTINCT t.token)=$tcount";
         }
@@ -355,11 +443,18 @@ END;");
         var list = new List<(string, int)>();
         using var cmd = _con.CreateCommand();
         if (string.IsNullOrEmpty(prefix))
-            cmd.CommandText = "SELECT token, df FROM tag_freq ORDER BY df DESC LIMIT $n;";
+            cmd.CommandText = "SELECT token, SUM(df) AS df FROM (" +
+                "SELECT token, df FROM tag_freq UNION ALL SELECT token, df FROM user_tag_freq" +
+                ") GROUP BY token ORDER BY df DESC LIMIT $n;";
         else
         {
             var p = prefix.ToLowerInvariant();
-            cmd.CommandText = "SELECT token, df FROM tag_freq WHERE token >= $p AND token < $phi ORDER BY df DESC LIMIT $n;";
+            // Blend prompt tags (tag_freq) + manual tags (user_tag_freq); the prefix range is pushed
+            // into BOTH legs (each uses its index) then summed, so a token in both ranks by total df.
+            cmd.CommandText = "SELECT token, SUM(df) AS df FROM (" +
+                "SELECT token, df FROM tag_freq WHERE token >= $p AND token < $phi " +
+                "UNION ALL SELECT token, df FROM user_tag_freq WHERE token >= $p AND token < $phi" +
+                ") GROUP BY token ORDER BY df DESC LIMIT $n;";
             cmd.Parameters.AddWithValue("$p", p);
             cmd.Parameters.AddWithValue("$phi", PrefixHi(p));
         }
@@ -402,7 +497,8 @@ END;");
             OriginalState = (string)(G("original_state") ?? "present"),
             Archived = Convert.ToInt64(G("archived") ?? 0L) != 0,
             ScannedAt = (string)(G("scanned_at") ?? ""),
-            Phash = G("phash") is { } ph ? Convert.ToInt64(ph) : null
+            Phash = G("phash") is { } ph ? Convert.ToInt64(ph) : null,
+            Favorite = Convert.ToInt64(G("favorite") ?? 0L) != 0
         };
     }
 
@@ -417,6 +513,169 @@ END;");
     /// <summary>Non-archived images the parser found no tags for (drives the sidebar "Unsorted" count).</summary>
     public long UntaggedCount() => Convert.ToInt64(Scalar(
         "SELECT COUNT(*) FROM images WHERE archived=0 AND id NOT IN (SELECT image_id FROM image_tags);") ?? 0L);
+
+    // ---------------- v3 user state: favorites / notes / user tags / collections ----------------
+    // All of this lives in separate tables/columns that UpsertCore never rewrites, so a rescan
+    // never clears it (the load-bearing v3 invariant). Manual tags are normalized via the SAME
+    // PromptSimilarity.TokenSet the scanner + SearchParser use, so search/autocomplete stay consistent.
+
+    /// <summary>Set/clear an image's favorite flag. Excluded from UpsertCore → survives a rescan.</summary>
+    public void SetFavorite(long id, bool on) =>
+        Exec("UPDATE images SET favorite=$f WHERE id=$id;", ("$f", on ? 1 : 0), ("$id", id));
+
+    /// <summary>Non-archived favorited images (sidebar Favorites count).</summary>
+    public long FavoriteCount() =>
+        Convert.ToInt64(Scalar("SELECT COUNT(*) FROM images WHERE favorite=1 AND archived=0;") ?? 0L);
+
+    /// <summary>Upsert the per-image note (empty body clears it to ''); stamps updated_at (local ISO).</summary>
+    public void SetNote(long id, string body) =>
+        Exec("INSERT INTO image_notes(image_id, body, updated_at) VALUES($id,$b,$u) " +
+             "ON CONFLICT(image_id) DO UPDATE SET body=$b, updated_at=$u;",
+             ("$id", id), ("$b", body ?? ""), ("$u", DateTime.Now.ToString("s")));
+
+    /// <summary>(body, updatedAt) for an image, or null when no note exists.</summary>
+    public (string Body, string UpdatedAt)? GetNote(long id)
+    {
+        using var cmd = _con.CreateCommand();
+        cmd.CommandText = "SELECT body, updated_at FROM image_notes WHERE image_id=$id;";
+        cmd.Parameters.AddWithValue("$id", id);
+        using var rd = cmd.ExecuteReader();
+        return rd.Read() ? (rd.GetString(0), rd.GetString(1)) : null;
+    }
+
+    /// <summary>Add manual tags from free text (TokenSet → 0..N normalized tokens; INSERT OR IGNORE).
+    /// Returns the tokens parsed from the text. user_tag_freq is trigger-maintained.</summary>
+    public IReadOnlyList<string> AddUserTags(long id, string text)
+    {
+        var tokens = PromptSimilarity.TokenSet(text).ToList();
+        if (tokens.Count == 0) return tokens;
+        using var tx = _con.BeginTransaction();
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.CommandText = "INSERT OR IGNORE INTO user_tags(image_id, token) VALUES($id,$t);";
+            cmd.Parameters.AddWithValue("$id", id);
+            var pT = cmd.Parameters.Add("$t", SqliteType.Text);
+            foreach (var t in tokens) { pT.Value = t; cmd.ExecuteNonQuery(); }
+        }
+        tx.Commit();
+        return tokens;
+    }
+
+    /// <summary>Remove one manual tag from an image.</summary>
+    public void RemoveUserTag(long id, string token) =>
+        Exec("DELETE FROM user_tags WHERE image_id=$id AND token=$t;", ("$id", id), ("$t", token));
+
+    /// <summary>Prompt-derived tags (read-only Charms) for an image — from image_tags.</summary>
+    public IReadOnlyList<string> PromptTagsFor(long id) => TokenList("image_tags", id);
+    /// <summary>Manual ('Your') tags for an image — from user_tags.</summary>
+    public IReadOnlyList<string> UserTagsFor(long id) => TokenList("user_tags", id);
+    private IReadOnlyList<string> TokenList(string table, long id)
+    {
+        var list = new List<string>();
+        using var cmd = _con.CreateCommand();
+        cmd.CommandText = $"SELECT token FROM {table} WHERE image_id=$id ORDER BY token;"; // table is a trusted constant
+        cmd.Parameters.AddWithValue("$id", id);
+        using var rd = cmd.ExecuteReader();
+        while (rd.Read()) list.Add(rd.GetString(0));
+        return list;
+    }
+
+    /// <summary>Collections name-sorted (COLLATE NOCASE) with their membership count.</summary>
+    public IReadOnlyList<(long Id, string Name, int Count)> ListCollections()
+    {
+        var list = new List<(long, string, int)>();
+        using var cmd = _con.CreateCommand();
+        cmd.CommandText = @"SELECT c.id, c.name,
+                              (SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id=c.id)
+                            FROM collections c ORDER BY c.name COLLATE NOCASE;";
+        using var rd = cmd.ExecuteReader();
+        while (rd.Read()) list.Add((rd.GetInt64(0), rd.GetString(1), rd.GetInt32(2)));
+        return list;
+    }
+
+    /// <summary>Create a collection. Returns its id, or -1 if the name already exists (UNIQUE NOCASE).</summary>
+    public long CreateCollection(string name)
+    {
+        try
+        {
+            using var cmd = _con.CreateCommand();
+            cmd.CommandText = "INSERT INTO collections(name) VALUES($n); SELECT last_insert_rowid();";
+            cmd.Parameters.AddWithValue("$n", (name ?? "").Trim());
+            return Convert.ToInt64(cmd.ExecuteScalar());
+        }
+        catch (SqliteException) { return -1; }   // UNIQUE(name COLLATE NOCASE) violation
+    }
+
+    /// <summary>Rename a collection. Returns false if the new name collides (UNIQUE NOCASE) or no row.</summary>
+    public bool RenameCollection(long id, string name)
+    {
+        try { return Exec("UPDATE collections SET name=$n WHERE id=$id;", ("$n", (name ?? "").Trim()), ("$id", id)) > 0; }
+        catch (SqliteException) { return false; }
+    }
+
+    /// <summary>Delete a collection; collection_items rows cascade away.</summary>
+    public void DeleteCollection(long id) => Exec("DELETE FROM collections WHERE id=$id;", ("$id", id));
+
+    /// <summary>Add images to a collection (idempotent — INSERT OR IGNORE on the PK).</summary>
+    public void AddToCollection(long collectionId, IEnumerable<long> imageIds) =>
+        CollectionMembership("INSERT OR IGNORE INTO collection_items(collection_id, image_id) VALUES($c,$i);", collectionId, imageIds);
+
+    /// <summary>Remove images from a collection.</summary>
+    public void RemoveFromCollection(long collectionId, IEnumerable<long> imageIds) =>
+        CollectionMembership("DELETE FROM collection_items WHERE collection_id=$c AND image_id=$i;", collectionId, imageIds);
+
+    private void CollectionMembership(string sql, long collectionId, IEnumerable<long> imageIds)
+    {
+        using var tx = _con.BeginTransaction();
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.CommandText = sql;
+            cmd.Parameters.AddWithValue("$c", collectionId);
+            var pI = cmd.Parameters.Add("$i", SqliteType.Integer);
+            foreach (var id in imageIds) { pI.Value = id; cmd.ExecuteNonQuery(); }
+        }
+        tx.Commit();
+    }
+
+    /// <summary>T27 Auto-Tag (suggest-only KNN): find non-archived images within Hamming maxDistance
+    /// of the target's perceptual hash that ALSO carry manual user tags, then vote-rank their user
+    /// tags (excluding tokens already on the target) capped at <paramref name="max"/>. Writes NOTHING
+    /// — the caller backfills phashes first (so a NULL target hash yields an empty result here).</summary>
+    public AutotagResult SuggestTagsByPhash(long id, int maxDistance = 3, int max = 20)
+    {
+        var res = new AutotagResult();
+        if (GetById(id)?.Phash is not long th) return res;   // not hashed yet → nothing to suggest
+        int d = Math.Min(Math.Max(maxDistance, 0), 3);
+
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.CommandText = @"SELECT i.id, i.phash FROM images i
+                                WHERE i.archived=0 AND i.phash IS NOT NULL AND i.id<>$id
+                                  AND EXISTS (SELECT 1 FROM user_tags u WHERE u.image_id=i.id);";
+            cmd.Parameters.AddWithValue("$id", id);
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read())
+            {
+                var dist = PerceptualHash.Hamming(th, rd.GetInt64(1));
+                if (dist <= d) res.Neighbors.Add((rd.GetInt64(0), dist));
+            }
+        }
+        res.Neighbors.Sort((a, b) => a.Distance.CompareTo(b.Distance));
+        if (res.Neighbors.Count == 0) return res;
+
+        // Exclude tokens already on the target (its manual tags + prompt tags).
+        var existing = new HashSet<string>(UserTagsFor(id), StringComparer.Ordinal);
+        foreach (var t in PromptTagsFor(id)) existing.Add(t);
+
+        var votes = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var (nid, _) in res.Neighbors)
+            foreach (var tok in UserTagsFor(nid))
+                if (!existing.Contains(tok)) votes[tok] = votes.GetValueOrDefault(tok) + 1;
+
+        res.Suggestions = votes.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal)
+            .Take(max).Select(kv => new AutotagSuggestion(kv.Key, kv.Value)).ToList();
+        return res;
+    }
 
     // ---------------- Find Duplicates (perceptual hash) ----------------
 

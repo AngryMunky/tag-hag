@@ -8,7 +8,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>TheTagHag</RootNamespace>
     <AssemblyName>TheTagHag</AssemblyName>
-    <Version>1.1.0</Version>
+    <Version>2.0.0</Version>
     <Authors>Angry Munky</Authors>
     <Company>Angry Munky</Company>
     <Product>The Tag Hag</Product>
@@ -55,5 +55,17 @@
   </ItemGroup>
 
   <!-- NOTE: ProtectedData / TaskScheduler arrive with their tickets (T16/T17). -->
+
+  <!-- The PUBLIC mirror (a separate git repo, AngryMunky/tag-hag) lives nested at tag-hag\ inside
+       this project folder after the 2026-06-23 consolidation. It carries its own copy of every
+       source file + an obj\ with generated .cs, which the SDK's default **/*.cs / EmbeddedResource
+       globs would otherwise compile into THIS app (CS0111 duplicate-definition errors). Exclude the
+       entire mirror subtree from this project's default item globs — it is built from its own csproj. -->
+  <ItemGroup>
+    <Compile Remove="tag-hag\**\*.cs" />
+    <EmbeddedResource Remove="tag-hag\**" />
+    <None Remove="tag-hag\**" />
+    <Content Remove="tag-hag\**" />
+  </ItemGroup>
 
 </Project>

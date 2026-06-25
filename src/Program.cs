@@ -62,6 +62,20 @@ internal static class Program
         if (args.Any(a => string.Equals(a, "--selftest-dupes", StringComparison.OrdinalIgnoreCase)))
             return DupesSelfTest();
 
+        if (args.Any(a => string.Equals(a, "--selftest-v3migrate", StringComparison.OrdinalIgnoreCase)))
+            return V3MigrateSelfTest();
+
+        if (args.Any(a => string.Equals(a, "--selftest-favorites", StringComparison.OrdinalIgnoreCase)))
+            return FavoritesSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-notes", StringComparison.OrdinalIgnoreCase)))
+            return NotesSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-usertags", StringComparison.OrdinalIgnoreCase)))
+            return UserTagsSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-collections", StringComparison.OrdinalIgnoreCase)))
+            return CollectionsSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-autotag", StringComparison.OrdinalIgnoreCase)))
+            return AutotagSelfTest();
+
         if (args.Any(a => string.Equals(a, "--selftest-optimize", StringComparison.OrdinalIgnoreCase)))
             return OptimizeSelfTest();
 
@@ -1142,6 +1156,455 @@ internal static class Program
             WriteResultNamed(log, "selftest-dupes-result.txt");
             return 2;
         }
+    }
+
+    /// <summary>
+    /// T23 (v2.0): the v3 schema foundation + migration. Verifies (1) a fresh DB is born at v3 with
+    /// the full additive delta (favorite column + four tables + triggers + indexes), (2) an existing
+    /// v2 DB migrates to v3 idempotently with favorite added and every row defaulting 0, and (3) all
+    /// v2.0 user state (favorite flag, note, user tag, collection membership) SURVIVES a simulated
+    /// rescan (UpsertCore's full image_tags replace) and an archive, then cascades away on delete.
+    /// </summary>
+    private static int V3MigrateSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder();
+        var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string label, bool cond) { if (!cond) ok = false; W($"  [{(cond ? "ok" : "FAIL")}] {label}"); }
+
+        SqliteConnection Open(string p) { var c = new SqliteConnection($"Data Source={p}"); c.Open(); Exec(c, "PRAGMA foreign_keys=ON;"); return c; }
+        bool Obj(SqliteConnection c, string type, string name) =>
+            Convert.ToInt64(Scalar(c, $"SELECT COUNT(*) FROM sqlite_master WHERE type='{type}' AND name='{name}';")) > 0;
+        bool HasCol(SqliteConnection c, string table, string col)
+        {
+            using var cmd = c.CreateCommand(); cmd.CommandText = $"PRAGMA table_info({table});";
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read()) if (string.Equals(rd.GetString(1), col, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+        long L(SqliteConnection c, string sql) => Convert.ToInt64(Scalar(c, sql) ?? 0L);
+
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — v3 schema foundation + migration (T23) self-test");
+
+            // ---- Part 1: a fresh DB is born at v3 with the whole additive delta ----
+            var freshPath = FreshDb("selftest-v3-fresh.db");
+            using (new LibraryDb(freshPath)) { }   // EnsureSchema + Migrate on a brand-new file
+            using (var c = Open(freshPath))
+            {
+                Check("fresh: schema_version = 3", L(c, "SELECT v FROM meta WHERE k='schema_version';") == 3);
+                Check("fresh: images.favorite column present", HasCol(c, "images", "favorite"));
+                Check("fresh: image_notes table", Obj(c, "table", "image_notes"));
+                Check("fresh: user_tags table", Obj(c, "table", "user_tags"));
+                Check("fresh: user_tag_freq table", Obj(c, "table", "user_tag_freq"));
+                Check("fresh: collections table", Obj(c, "table", "collections"));
+                Check("fresh: collection_items table", Obj(c, "table", "collection_items"));
+                Check("fresh: utags_ai + utags_ad triggers", Obj(c, "trigger", "utags_ai") && Obj(c, "trigger", "utags_ad"));
+                Check("fresh: ix_images_favorite index", Obj(c, "index", "ix_images_favorite"));
+                Check("fresh: ix_user_tags_token index", Obj(c, "index", "ix_user_tags_token"));
+                Check("fresh: ix_collection_items_image index", Obj(c, "index", "ix_collection_items_image"));
+
+                // user_tag_freq triggers mirror tag_freq: insert bumps df, delete clears the row at 0.
+                Exec(c, "INSERT INTO images(source_root,rel_path,abs_path,file_name,ext,size_bytes,mtime_ticks,scanned_at) VALUES('r','t.png','t.png','t.png','.png',1,1,'t');");
+                long imgId = L(c, "SELECT id FROM images WHERE abs_path='t.png';");
+                Exec(c, $"INSERT INTO user_tags(image_id,token) VALUES ({imgId},'red dress');");
+                Check("utags_ai: user_tag_freq df = 1", L(c, "SELECT df FROM user_tag_freq WHERE token='red dress';") == 1);
+                Exec(c, $"DELETE FROM user_tags WHERE image_id={imgId} AND token='red dress';");
+                Check("utags_ad: user_tag_freq row gone at df 0", L(c, "SELECT COUNT(*) FROM user_tag_freq WHERE token='red dress';") == 0);
+            }
+
+            // ---- Part 2: an existing v2 DB migrates to v3 (idempotently) ----
+            var v2Path = FreshDb("selftest-v3-from-v2.db");
+            using (var c = Open(v2Path))
+            {
+                // Synthesize the real v2 images shape (phash present, favorite ABSENT) + schema_version=2 + 3 rows.
+                Exec(c, @"CREATE TABLE images (
+                  id INTEGER PRIMARY KEY,
+                  source_root TEXT NOT NULL, rel_path TEXT NOT NULL, abs_path TEXT NOT NULL,
+                  file_name TEXT NOT NULL, ext TEXT NOT NULL,
+                  size_bytes INTEGER NOT NULL, mtime_ticks INTEGER NOT NULL,
+                  width INTEGER, height INTEGER, meta_format TEXT, meta_source TEXT,
+                  prompt TEXT NOT NULL DEFAULT '', negative TEXT NOT NULL DEFAULT '',
+                  params_json TEXT, thumb_path TEXT,
+                  original_state TEXT NOT NULL DEFAULT 'present',
+                  archived INTEGER NOT NULL DEFAULT 0,
+                  scanned_at TEXT NOT NULL, phash INTEGER,
+                  UNIQUE(abs_path));");
+                Exec(c, "CREATE TABLE meta ( k TEXT PRIMARY KEY, v TEXT );");
+                Exec(c, "INSERT INTO meta(k,v) VALUES('schema_version','2');");
+                for (int i = 1; i <= 3; i++)
+                    Exec(c, $"INSERT INTO images(source_root,rel_path,abs_path,file_name,ext,size_bytes,mtime_ticks,scanned_at) VALUES('r','v{i}.png','v{i}.png','v{i}.png','.png',1,1,'t');");
+            }
+            using (new LibraryDb(v2Path)) { }   // opening migrates v2 → v3
+            using (var c = Open(v2Path))
+            {
+                Check("v2→v3: schema_version now 3", L(c, "SELECT v FROM meta WHERE k='schema_version';") == 3);
+                Check("v2→v3: favorite column added", HasCol(c, "images", "favorite"));
+                Check("v2→v3: 3 rows preserved, all favorite=0",
+                    L(c, "SELECT COUNT(*) FROM images;") == 3 && L(c, "SELECT COUNT(*) FROM images WHERE favorite=0;") == 3);
+                Check("v2→v3: ix_images_favorite built", Obj(c, "index", "ix_images_favorite"));
+                Check("v2→v3: four new tables present",
+                    Obj(c, "table", "image_notes") && Obj(c, "table", "user_tags")
+                    && Obj(c, "table", "collections") && Obj(c, "table", "collection_items"));
+                Check("v2→v3: new tables empty",
+                    L(c, "SELECT COUNT(*) FROM user_tags;") == 0 && L(c, "SELECT COUNT(*) FROM collection_items;") == 0
+                    && L(c, "SELECT COUNT(*) FROM image_notes;") == 0);
+            }
+            using (new LibraryDb(v2Path)) { }   // re-open: must be a no-op
+            using (var c = Open(v2Path))
+                Check("v2→v3: re-open idempotent (still v3)",
+                    L(c, "SELECT v FROM meta WHERE k='schema_version';") == 3 && HasCol(c, "images", "favorite"));
+
+            // ---- Part 2b: an existing v1 DB (no phash, no favorite) migrates straight to v3 ----
+            // Exercises BOTH the current<2 (phash) and current<3 (favorite) branches in one open, and
+            // proves EnsureSchema no longer crashes building an index over a not-yet-added column.
+            var v1Path = FreshDb("selftest-v3-from-v1.db");
+            using (var c = Open(v1Path))
+            {
+                // Real v1 images shape: NO phash, NO favorite.
+                Exec(c, @"CREATE TABLE images (
+                  id INTEGER PRIMARY KEY,
+                  source_root TEXT NOT NULL, rel_path TEXT NOT NULL, abs_path TEXT NOT NULL,
+                  file_name TEXT NOT NULL, ext TEXT NOT NULL,
+                  size_bytes INTEGER NOT NULL, mtime_ticks INTEGER NOT NULL,
+                  width INTEGER, height INTEGER, meta_format TEXT, meta_source TEXT,
+                  prompt TEXT NOT NULL DEFAULT '', negative TEXT NOT NULL DEFAULT '',
+                  params_json TEXT, thumb_path TEXT,
+                  original_state TEXT NOT NULL DEFAULT 'present',
+                  archived INTEGER NOT NULL DEFAULT 0,
+                  scanned_at TEXT NOT NULL,
+                  UNIQUE(abs_path));");
+                Exec(c, "CREATE TABLE meta ( k TEXT PRIMARY KEY, v TEXT );");
+                Exec(c, "INSERT INTO meta(k,v) VALUES('schema_version','1');");
+                Exec(c, "INSERT INTO images(source_root,rel_path,abs_path,file_name,ext,size_bytes,mtime_ticks,scanned_at) VALUES('r','o.png','o.png','o.png','.png',1,1,'t');");
+            }
+            using (new LibraryDb(v1Path)) { }   // must NOT crash; runs current<2 + current<3 then stamps once
+            using (var c = Open(v1Path))
+            {
+                Check("v1→v3: schema_version now 3", L(c, "SELECT v FROM meta WHERE k='schema_version';") == 3);
+                Check("v1→v3: phash column added (current<2 branch)", HasCol(c, "images", "phash"));
+                Check("v1→v3: favorite column added (current<3 branch)", HasCol(c, "images", "favorite"));
+                Check("v1→v3: both column indexes built", Obj(c, "index", "ix_images_phash") && Obj(c, "index", "ix_images_favorite"));
+                Check("v1→v3: existing row preserved + favorite=0", L(c, "SELECT COUNT(*) FROM images WHERE favorite=0;") == 1);
+                Check("v1→v3: v3 tables present", Obj(c, "table", "user_tags") && Obj(c, "table", "collections"));
+            }
+
+            // ---- Part 3: user state survives rescan + archive; cascades on image delete ----
+            var statePath = FreshDb("selftest-v3-state.db");
+            using (var db = new LibraryDb(statePath))
+            {
+                ImageRow Row(string abs, params string[] tags) => new()
+                {
+                    SourceRoot = "C:\\src", RelPath = abs, AbsPath = abs, FileName = abs, Ext = ".png",
+                    SizeBytes = 100, MtimeTicks = 1, MetaFormat = "a1111", MetaSource = "embedded",
+                    Prompt = "p", Negative = "n", ScannedAt = "2026-06-24", Tags = tags.ToList()
+                };
+                db.Upsert(Row("X.png", "alpha", "beta"));
+                long id = db.FindIdByAbsPath("X.png")!.Value;
+
+                // Attach v2.0 user state directly (the feature setters land in T24–T28).
+                using (var c = Open(statePath))
+                {
+                    Exec(c, $"UPDATE images SET favorite=1 WHERE id={id};");
+                    Exec(c, $"INSERT INTO image_notes(image_id,body,updated_at) VALUES ({id},'my note','2026-06-24');");
+                    Exec(c, $"INSERT INTO user_tags(image_id,token) VALUES ({id},'mine');");
+                    Exec(c, "INSERT INTO collections(name) VALUES ('Faves');");
+                    Exec(c, $"INSERT INTO collection_items(collection_id,image_id) SELECT id,{id} FROM collections WHERE name='Faves';");
+                }
+
+                // Simulated rescan: re-upsert the SAME file with a DIFFERENT tag set.
+                db.Upsert(Row("X.png", "gamma", "delta"));
+                using (var c = Open(statePath))
+                {
+                    Check("rescan: image_tags rebuilt (alpha gone, gamma in)",
+                        L(c, $"SELECT COUNT(*) FROM image_tags WHERE image_id={id} AND token='alpha';") == 0
+                        && L(c, $"SELECT COUNT(*) FROM image_tags WHERE image_id={id} AND token='gamma';") == 1);
+                    Check("rescan: favorite SURVIVES", L(c, $"SELECT favorite FROM images WHERE id={id};") == 1);
+                    Check("rescan: note SURVIVES", L(c, $"SELECT COUNT(*) FROM image_notes WHERE image_id={id};") == 1);
+                    Check("rescan: user_tag SURVIVES", L(c, $"SELECT COUNT(*) FROM user_tags WHERE image_id={id} AND token='mine';") == 1);
+                    Check("rescan: collection membership SURVIVES", L(c, $"SELECT COUNT(*) FROM collection_items WHERE image_id={id};") == 1);
+                }
+
+                // Archive: state still intact.
+                db.SetArchived(id, "X-archived.png");
+                using (var c = Open(statePath))
+                    Check("archive: favorite/note/user_tag/collection all intact",
+                        L(c, $"SELECT favorite FROM images WHERE id={id};") == 1
+                        && L(c, $"SELECT COUNT(*) FROM image_notes WHERE image_id={id};") == 1
+                        && L(c, $"SELECT COUNT(*) FROM user_tags WHERE image_id={id};") == 1
+                        && L(c, $"SELECT COUNT(*) FROM collection_items WHERE image_id={id};") == 1);
+
+                // Delete the image: ON DELETE CASCADE drops note/user_tag/membership (collection stays).
+                db.Remove(id);
+                using (var c = Open(statePath))
+                {
+                    Check("delete cascade: note removed", L(c, $"SELECT COUNT(*) FROM image_notes WHERE image_id={id};") == 0);
+                    Check("delete cascade: user_tags removed", L(c, $"SELECT COUNT(*) FROM user_tags WHERE image_id={id};") == 0);
+                    Check("delete cascade: collection_items removed", L(c, $"SELECT COUNT(*) FROM collection_items WHERE image_id={id};") == 0);
+                    Check("delete cascade: collection itself remains", L(c, "SELECT COUNT(*) FROM collections WHERE name='Faves';") == 1);
+                }
+            }
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL");
+            WriteResultNamed(log, "selftest-v3migrate-result.txt");
+            return ok ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            W("RESULT: FAIL (exception)");
+            W(ex.ToString());
+            WriteResultNamed(log, "selftest-v3migrate-result.txt");
+            return 2;
+        }
+    }
+
+    private static ImageRow TestRow(string name, params string[] tags) => new()
+    {
+        SourceRoot = "C:\\s", RelPath = name, AbsPath = name, FileName = name, Ext = ".png",
+        SizeBytes = 1, MtimeTicks = 1, MetaFormat = "a1111", MetaSource = "embedded",
+        Prompt = "p", Negative = "n", ScannedAt = "t", Tags = tags.ToList()
+    };
+
+    /// <summary>T24 Favorites: SetFavorite/FavoriteCount, ImageRow.Favorite mapping, the favoritesOnly
+    /// query filter (page==total parity + AND-composition), rescan survival, and the bridge counts/page.</summary>
+    private static int FavoritesSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Favorites (T24) self-test");
+            using var db = new LibraryDb(FreshDb("selftest-fav.db"));
+            db.Upsert(TestRow("A.png", "1girl", "solo")); db.Upsert(TestRow("B.png", "1girl")); db.Upsert(TestRow("C.png", "landscape"));
+            long A = db.FindIdByAbsPath("A.png")!.Value, B = db.FindIdByAbsPath("B.png")!.Value;
+
+            db.SetFavorite(A, true); db.SetFavorite(B, true);
+            Check("FavoriteCount = 2", db.FavoriteCount() == 2);
+            var fav = db.Query(SearchParser.Parse(""), 0, 100, includeArchived: true, favoritesOnly: true);
+            Check("favoritesOnly total = 2", fav.Total == 2);
+            Check("favoritesOnly page==total (no desync)", fav.Page.Count == fav.Total);
+            Check("ImageRow.Favorite mapped by name", fav.Page.All(r => r.Favorite));
+            Check("unfiltered total = 3", db.Query(SearchParser.Parse(""), 0, 100, true).Total == 3);
+            Check("favorites AND '1girl' = 2", db.Query(SearchParser.Parse("1girl"), 0, 100, true, favoritesOnly: true).Total == 2);
+            Check("favorites AND 'landscape' = 0", db.Query(SearchParser.Parse("landscape"), 0, 100, true, favoritesOnly: true).Total == 0);
+
+            db.Upsert(TestRow("A.png", "sunset", "beach"));   // rescan with a new tag set
+            Check("favorite SURVIVES rescan", db.FavoriteCount() == 2 && db.GetById(A)!.Favorite);
+            db.SetFavorite(A, false);
+            Check("unfavorite drops count to 1", db.FavoriteCount() == 1);
+
+            var bridge = new GalleryBridge(db, r => $"https://full.local/{r.Id}");
+            using var cd = System.Text.Json.JsonDocument.Parse(bridge.Handle("{\"type\":\"counts\"}")!);
+            Check("counts reply favorites = 1", cd.RootElement.GetProperty("favorites").GetInt32() == 1);
+            using var pd = System.Text.Json.JsonDocument.Parse(bridge.Handle("{\"type\":\"query\",\"raw\":\"\",\"page\":0,\"size\":60,\"favoritesOnly\":true}")!);
+            Check("bridge favoritesOnly total = 1", pd.RootElement.GetProperty("total").GetInt32() == 1);
+            Check("page item carries favorite flag", pd.RootElement.GetProperty("items")[0].GetProperty("favorite").GetBoolean());
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL"); WriteResultNamed(log, "selftest-favorites-result.txt"); return ok ? 0 : 1;
+        }
+        catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-favorites-result.txt"); return 2; }
+    }
+
+    /// <summary>T25 Notes: upsert semantics (one row), clear-on-empty, rescan + archive survival,
+    /// cascade on image delete, and the note carried on the bridge inspect reply.</summary>
+    private static int NotesSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Notes (T25) self-test");
+            var path = FreshDb("selftest-notes.db");
+            using var db = new LibraryDb(path);
+            db.Upsert(TestRow("X.png", "a"));
+            long X = db.FindIdByAbsPath("X.png")!.Value;
+
+            db.SetNote(X, "hello hoard");
+            var n1 = db.GetNote(X);
+            Check("GetNote body round-trips", n1 is { } && n1.Value.Body == "hello hoard");
+            Check("note has updatedAt", n1 is { } && !string.IsNullOrEmpty(n1.Value.UpdatedAt));
+            db.SetNote(X, "updated body");   // upsert
+            Check("upsert updates body", db.GetNote(X)?.Body == "updated body");
+            using (var raw = new SqliteConnection($"Data Source={path}"))
+            { raw.Open(); Check("upsert keeps exactly ONE row", Convert.ToInt64(Scalar(raw, $"SELECT COUNT(*) FROM image_notes WHERE image_id={X};")) == 1); }
+            db.SetNote(X, "");
+            Check("empty body clears to ''", db.GetNote(X)?.Body == "");
+
+            db.SetNote(X, "keep me");
+            db.Upsert(TestRow("X.png", "b"));   // rescan
+            Check("note SURVIVES rescan", db.GetNote(X)?.Body == "keep me");
+            db.SetArchived(X, "X-arch.png");
+            Check("note SURVIVES archive", db.GetNote(X)?.Body == "keep me");
+
+            var bridge = new GalleryBridge(db, r => $"https://full.local/{r.Id}");
+            using (var doc = System.Text.Json.JsonDocument.Parse(bridge.Handle($"{{\"type\":\"inspect\",\"id\":{X}}}")!))
+                Check("inspect reply carries note", doc.RootElement.GetProperty("note").GetString() == "keep me");
+
+            db.Remove(X);
+            Check("note CASCADES on image delete", db.GetNote(X) is null);
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL"); WriteResultNamed(log, "selftest-notes-result.txt"); return ok ? 0 : 1;
+        }
+        catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-notes-result.txt"); return 2; }
+    }
+
+    /// <summary>T26 Manual tags: TokenSet normalization, UNION search (manual tag matches though the
+    /// prompt lacked it), comma-AND arity, UNION dedupe, rescan-safety, autocomplete blend, and the
+    /// tagadd/tagdel bridge replies + inspect promptTags/userTags.</summary>
+    private static int UserTagsSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Manual tags (T26) self-test");
+            using var db = new LibraryDb(FreshDb("selftest-usertags.db"));
+            db.Upsert(TestRow("img.png", "1girl", "solo"));
+            long id = db.FindIdByAbsPath("img.png")!.Value;
+
+            var added = db.AddUserTags(id, "Red Dress");
+            Check("AddUserTags normalizes 'Red Dress' → 'red dress'", added.Contains("red dress") && db.UserTagsFor(id).Contains("red dress"));
+            Check("PromptTagsFor reads image_tags", db.PromptTagsFor(id).Contains("1girl"));
+            Check("search 'red dress' matches via UNION (prompt lacked it)", db.Query(SearchParser.Parse("red dress"), 0, 100, true).Total == 1);
+            Check("comma-AND '1girl, red dress' = 1 (arity)", db.Query(SearchParser.Parse("1girl, red dress"), 0, 100, true).Total == 1);
+
+            db.AddUserTags(id, "1girl");   // duplicate of a prompt tag
+            Check("UNION dedupe: '1girl' still total 1 (not double)", db.Query(SearchParser.Parse("1girl"), 0, 100, true).Total == 1);
+            var q = db.Query(SearchParser.Parse("red dress"), 0, 100, true);
+            Check("UNION query page==total parity", q.Page.Count == q.Total);
+            Check("autocomplete blends manual tags ('red' → 'red dress')", db.TopTags("red", 8).Any(t => t.Token == "red dress"));
+
+            db.Upsert(TestRow("img.png", "landscape"));   // rescan with new prompt tags
+            Check("user_tags SURVIVE rescan", db.UserTagsFor(id).Contains("red dress"));
+            Check("prompt tags rebuilt (1girl gone, landscape in)", !db.PromptTagsFor(id).Contains("1girl") && db.PromptTagsFor(id).Contains("landscape"));
+
+            db.RemoveUserTag(id, "red dress");
+            Check("RemoveUserTag drops it", !db.UserTagsFor(id).Contains("red dress"));
+
+            var bridge = new GalleryBridge(db, r => $"https://full.local/{r.Id}");
+            using (var ta = System.Text.Json.JsonDocument.Parse(bridge.Handle($"{{\"type\":\"tagadd\",\"id\":{id},\"text\":\"blue sky\"}}")!))
+                Check("tagadd reply type=tags + user has 'blue sky'",
+                    ta.RootElement.GetProperty("type").GetString() == "tags"
+                    && ta.RootElement.GetProperty("user").EnumerateArray().Any(x => x.GetString() == "blue sky"));
+            using (var td = System.Text.Json.JsonDocument.Parse(bridge.Handle($"{{\"type\":\"tagdel\",\"id\":{id},\"token\":\"blue sky\"}}")!))
+                Check("tagdel reply removes it", !td.RootElement.GetProperty("user").EnumerateArray().Any(x => x.GetString() == "blue sky"));
+
+            db.AddUserTags(id, "keepme");
+            using (var ins = System.Text.Json.JsonDocument.Parse(bridge.Handle($"{{\"type\":\"inspect\",\"id\":{id}}}")!))
+                Check("inspect carries userTags", ins.RootElement.GetProperty("userTags").EnumerateArray().Any(x => x.GetString() == "keepme"));
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL"); WriteResultNamed(log, "selftest-usertags-result.txt"); return ok ? 0 : 1;
+        }
+        catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-usertags-result.txt"); return 2; }
+    }
+
+    /// <summary>T28 Collections: create + UNIQUE-NOCASE, idempotent add, filter==membership (page==total),
+    /// AND-composition, remove, rename, name-sort, and cascade on both image delete and collection delete.</summary>
+    private static int CollectionsSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Collections (T28) self-test");
+            var path = FreshDb("selftest-collections.db");
+            using var db = new LibraryDb(path);
+            db.Upsert(TestRow("A.png", "x")); db.Upsert(TestRow("B.png", "x")); db.Upsert(TestRow("C.png", "y"));
+            long A = db.FindIdByAbsPath("A.png")!.Value, B = db.FindIdByAbsPath("B.png")!.Value, C = db.FindIdByAbsPath("C.png")!.Value;
+
+            long fav = db.CreateCollection("Faves");
+            Check("CreateCollection returns id", fav > 0);
+            Check("duplicate name (NOCASE) rejected → -1", db.CreateCollection("faves") == -1);
+            db.AddToCollection(fav, new[] { A, B });
+            db.AddToCollection(fav, new[] { A });   // idempotent re-add
+            Check("ListCollections membership count = 2 (idempotent)", db.ListCollections().Single().Count == 2);
+
+            var q = db.Query(SearchParser.Parse(""), 0, 100, true, collectionId: fav);
+            Check("collection filter total = 2", q.Total == 2);
+            Check("collection page==total parity", q.Page.Count == q.Total);
+            Check("collection AND 'x' = 2", db.Query(SearchParser.Parse("x"), 0, 100, true, collectionId: fav).Total == 2);
+            Check("collection AND 'y' = 0", db.Query(SearchParser.Parse("y"), 0, 100, true, collectionId: fav).Total == 0);
+
+            db.RemoveFromCollection(fav, new[] { A });
+            Check("RemoveFromCollection → membership 1", db.ListCollections().Single().Count == 1);
+            db.Remove(B);
+            Check("image delete CASCADES membership (0 left)", db.ListCollections().Single().Count == 0);
+            Check("RenameCollection", db.RenameCollection(fav, "Best") && db.ListCollections().Single().Name == "Best");
+
+            db.CreateCollection("Zeta"); db.CreateCollection("Alpha");
+            Check("ListCollections name-sorted (NOCASE)",
+                db.ListCollections().Select(c => c.Name).SequenceEqual(new[] { "Alpha", "Best", "Zeta" }));
+
+            db.AddToCollection(fav, new[] { C });
+            db.DeleteCollection(fav);
+            Check("collection delete removes it from the list", db.ListCollections().All(c => c.Name != "Best"));
+            using (var raw = new SqliteConnection($"Data Source={path}"))
+            { raw.Open(); Check("collection delete CASCADES its items (no orphans)", Convert.ToInt64(Scalar(raw, $"SELECT COUNT(*) FROM collection_items WHERE collection_id={fav};")) == 0); }
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL"); WriteResultNamed(log, "selftest-collections-result.txt"); return ok ? 0 : 1;
+        }
+        catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-collections-result.txt"); return 2; }
+    }
+
+    /// <summary>T27 Auto-Tag (suggest-only KNN): neighbors must be near AND have user tags; vote-rank;
+    /// exclude tokens already on the target; suggest-only (no writes); null-hash guard; reply shape + gen.</summary>
+    private static int AutotagSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Auto-Tag (T27) self-test");
+            using var db = new LibraryDb(FreshDb("selftest-autotag.db"));
+            long Ins(string n) { db.Upsert(TestRow(n)); return db.FindIdByAbsPath(n)!.Value; }
+            long T = Ins("T.png"), N1 = Ins("N1.png"), N2 = Ins("N2.png"), F = Ins("F.png"), NB = Ins("NB.png");
+            // Controlled hashes: T=0; N1 dist 1; N2 dist 2; NB dist 3 (near, but NO user tags); F dist 64 (far).
+            db.UpdatePhash(T, 0L); db.UpdatePhash(N1, 0b1L); db.UpdatePhash(N2, 0b11L); db.UpdatePhash(NB, 0b111L); db.UpdatePhash(F, -1L);
+            db.AddUserTags(N1, "red dress"); db.AddUserTags(N1, "1girl");
+            db.AddUserTags(N2, "red dress");
+            db.AddUserTags(F, "far tag");          // far → must never surface
+
+            var res = db.SuggestTagsByPhash(T, 3, 20);
+            Check("neighbors = N1,N2 (near AND have user tags; NB/F excluded)",
+                res.Neighbors.Select(n => n.Id).OrderBy(x => x).SequenceEqual(new[] { N1, N2 }.OrderBy(x => x)));
+            Check("top suggestion 'red dress' votes = 2", res.Suggestions.Count > 0 && res.Suggestions[0].Token == "red dress" && res.Suggestions[0].Votes == 2);
+            Check("'1girl' suggested votes = 1", res.Suggestions.Any(s => s.Token == "1girl" && s.Votes == 1));
+            Check("far image's tag excluded", !res.Suggestions.Any(s => s.Token == "far tag"));
+
+            db.AddUserTags(T, "red dress");        // already on target now
+            var res2 = db.SuggestTagsByPhash(T, 3, 20);
+            Check("token already on target excluded", !res2.Suggestions.Any(s => s.Token == "red dress"));
+            Check("'1girl' still suggested", res2.Suggestions.Any(s => s.Token == "1girl"));
+
+            var before = db.UserTagsFor(T).OrderBy(x => x).ToList();
+            db.SuggestTagsByPhash(T, 3, 20);
+            Check("suggest-only: target user_tags byte-for-byte unchanged", db.UserTagsFor(T).OrderBy(x => x).SequenceEqual(before));
+
+            long U = Ins("U.png");                 // no phash assigned
+            Check("null target hash → empty (caller backfills at runtime)", db.SuggestTagsByPhash(U, 3, 20).Suggestions.Count == 0);
+
+            var reply = GalleryBridge.AutotagReply(db, r => $"https://full.local/{r.Id}", T, db.SuggestTagsByPhash(T, 3, 20), 7);
+            using var doc = System.Text.Json.JsonDocument.Parse(reply);
+            Check("AutotagReply type=autotag + gen echoed", doc.RootElement.GetProperty("type").GetString() == "autotag" && doc.RootElement.GetProperty("gen").GetInt32() == 7);
+            Check("reply has suggestions + 2 neighbors", doc.RootElement.GetProperty("suggestions").GetArrayLength() > 0 && doc.RootElement.GetProperty("neighbors").GetArrayLength() == 2);
+            var nb0 = doc.RootElement.GetProperty("neighbors")[0];
+            Check("neighbor carries url + distance", (nb0.GetProperty("url").GetString() ?? "").StartsWith("https://full.local/") && nb0.TryGetProperty("distance", out _));
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL"); WriteResultNamed(log, "selftest-autotag-result.txt"); return ok ? 0 : 1;
+        }
+        catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-autotag-result.txt"); return 2; }
     }
 
     private static string FreshDb(string name)
