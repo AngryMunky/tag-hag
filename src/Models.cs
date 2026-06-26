@@ -45,6 +45,33 @@ public sealed class ImageRow
     /// <summary>Per-image favorite star (v3 images.favorite). Excluded from UpsertCore (pure user
     /// intent) so a rescan keeps it; mapped by name in MapRow.</summary>
     public bool Favorite { get; set; }
+
+    /// <summary>v4 (v2.1): true once the image has been resampled into the managed store
+    /// (images.optimized). Like Favorite, it is post-scan state EXCLUDED from UpsertCore, so a rescan
+    /// of the store keeps it. Drives the ✨O badge (T31) + the idempotent optimize skip (T30).</summary>
+    public bool Optimized { get; set; }
+    /// <summary>Longest-edge target (px) the image was optimized to; null if never optimized (opt_dim).</summary>
+    public int? OptDim { get; set; }
+    /// <summary>ISO timestamp of optimization; null if never optimized (opt_at).</summary>
+    public string? OptAt { get; set; }
+}
+
+/// <summary>One node in the derived folder tree (T33/F24). The hierarchy is DERIVED from
+/// (source_root, rel_path) — there is no folders table. <see cref="Path"/> is the directory relative
+/// to <see cref="Root"/> ("" = the root itself); <see cref="Count"/> is the recursive image total
+/// (this folder + all descendants). Clicking a node sends Root+Path to the folderPath query filter.</summary>
+public sealed class FolderNode
+{
+    /// <summary>The owning source_root (absolute). Disambiguates identical rel-dirs across roots
+    /// (the managed store is always a second scanned root).</summary>
+    public string Root { get; set; } = "";
+    /// <summary>Directory relative to Root, OS-separated ("" = files directly under Root).</summary>
+    public string Path { get; set; } = "";
+    /// <summary>Display leaf (last path segment; the root node shows the root's folder name).</summary>
+    public string Name { get; set; } = "";
+    /// <summary>Recursive image count: this folder plus everything beneath it (non-archived).</summary>
+    public int Count { get; set; }
+    public List<FolderNode> Children { get; set; } = new();
 }
 
 /// <summary>One auto-tag suggestion: a candidate token + how many similar images carry it (T27).</summary>

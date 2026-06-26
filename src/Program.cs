@@ -64,6 +64,18 @@ internal static class Program
 
         if (args.Any(a => string.Equals(a, "--selftest-v3migrate", StringComparison.OrdinalIgnoreCase)))
             return V3MigrateSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-v4migrate", StringComparison.OrdinalIgnoreCase)))
+            return V4MigrateSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-optimizelib", StringComparison.OrdinalIgnoreCase)))
+            return OptimizeLibrarySelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-optindicator", StringComparison.OrdinalIgnoreCase)))
+            return OptIndicatorSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-relink", StringComparison.OrdinalIgnoreCase)))
+            return RelinkSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-folders", StringComparison.OrdinalIgnoreCase)))
+            return FoldersSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-filemanager", StringComparison.OrdinalIgnoreCase)))
+            return FileManagerSelfTest();
 
         if (args.Any(a => string.Equals(a, "--selftest-favorites", StringComparison.OrdinalIgnoreCase)))
             return FavoritesSelfTest();
@@ -1194,7 +1206,7 @@ internal static class Program
             using (new LibraryDb(freshPath)) { }   // EnsureSchema + Migrate on a brand-new file
             using (var c = Open(freshPath))
             {
-                Check("fresh: schema_version = 3", L(c, "SELECT v FROM meta WHERE k='schema_version';") == 3);
+                Check("fresh: schema_version = current", L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion);
                 Check("fresh: images.favorite column present", HasCol(c, "images", "favorite"));
                 Check("fresh: image_notes table", Obj(c, "table", "image_notes"));
                 Check("fresh: user_tags table", Obj(c, "table", "user_tags"));
@@ -1240,7 +1252,7 @@ internal static class Program
             using (new LibraryDb(v2Path)) { }   // opening migrates v2 → v3
             using (var c = Open(v2Path))
             {
-                Check("v2→v3: schema_version now 3", L(c, "SELECT v FROM meta WHERE k='schema_version';") == 3);
+                Check("v2→v3: schema_version migrated to current", L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion);
                 Check("v2→v3: favorite column added", HasCol(c, "images", "favorite"));
                 Check("v2→v3: 3 rows preserved, all favorite=0",
                     L(c, "SELECT COUNT(*) FROM images;") == 3 && L(c, "SELECT COUNT(*) FROM images WHERE favorite=0;") == 3);
@@ -1254,8 +1266,8 @@ internal static class Program
             }
             using (new LibraryDb(v2Path)) { }   // re-open: must be a no-op
             using (var c = Open(v2Path))
-                Check("v2→v3: re-open idempotent (still v3)",
-                    L(c, "SELECT v FROM meta WHERE k='schema_version';") == 3 && HasCol(c, "images", "favorite"));
+                Check("v2→v3: re-open idempotent (still current)",
+                    L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion && HasCol(c, "images", "favorite"));
 
             // ---- Part 2b: an existing v1 DB (no phash, no favorite) migrates straight to v3 ----
             // Exercises BOTH the current<2 (phash) and current<3 (favorite) branches in one open, and
@@ -1283,7 +1295,7 @@ internal static class Program
             using (new LibraryDb(v1Path)) { }   // must NOT crash; runs current<2 + current<3 then stamps once
             using (var c = Open(v1Path))
             {
-                Check("v1→v3: schema_version now 3", L(c, "SELECT v FROM meta WHERE k='schema_version';") == 3);
+                Check("v1→v3: schema_version migrated to current", L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion);
                 Check("v1→v3: phash column added (current<2 branch)", HasCol(c, "images", "phash"));
                 Check("v1→v3: favorite column added (current<3 branch)", HasCol(c, "images", "favorite"));
                 Check("v1→v3: both column indexes built", Obj(c, "index", "ix_images_phash") && Obj(c, "index", "ix_images_favorite"));
@@ -1360,12 +1372,788 @@ internal static class Program
         }
     }
 
+    /// <summary>T29 v4 schema foundation + managed-store plumbing self-test: a fresh DB is born at v4;
+    /// an existing v3 DB migrates additively to v4 (idempotently, metadata-only); MarkOptimized moves a
+    /// row into the store keeping its id + all v3 user-state; 'optimized' survives a rescan and the
+    /// re-scan of the in-store path does NOT create a second row (R16); and AppPaths.LibraryStoreDir +
+    /// the meta(library_store_root) plumbing round-trip.</summary>
+    private static int V4MigrateSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder();
+        var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string label, bool cond) { if (!cond) ok = false; W($"  [{(cond ? "ok" : "FAIL")}] {label}"); }
+
+        SqliteConnection Open(string p) { var c = new SqliteConnection($"Data Source={p}"); c.Open(); Exec(c, "PRAGMA foreign_keys=ON;"); return c; }
+        bool Obj(SqliteConnection c, string type, string name) =>
+            Convert.ToInt64(Scalar(c, $"SELECT COUNT(*) FROM sqlite_master WHERE type='{type}' AND name='{name}';")) > 0;
+        bool HasCol(SqliteConnection c, string table, string col)
+        {
+            using var cmd = c.CreateCommand(); cmd.CommandText = $"PRAGMA table_info({table});";
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read()) if (string.Equals(rd.GetString(1), col, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+        long L(SqliteConnection c, string sql) => Convert.ToInt64(Scalar(c, sql) ?? 0L);
+
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — v4 schema foundation + managed-store (T29) self-test");
+
+            // ---- Part 1: a fresh DB is born at v4 with the three optimization columns + index ----
+            var freshPath = FreshDb("selftest-v4-fresh.db");
+            using (new LibraryDb(freshPath)) { }
+            using (var c = Open(freshPath))
+            {
+                Check("fresh: schema_version = current (4)",
+                    L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion && LibraryDb.SchemaVersion == 4);
+                Check("fresh: images.optimized column present", HasCol(c, "images", "optimized"));
+                Check("fresh: images.opt_dim column present", HasCol(c, "images", "opt_dim"));
+                Check("fresh: images.opt_at column present", HasCol(c, "images", "opt_at"));
+                Check("fresh: ix_images_optimized index", Obj(c, "index", "ix_images_optimized"));
+            }
+
+            // ---- Part 2: an existing v3 DB migrates to v4 (idempotently, metadata-only) ----
+            var v3Path = FreshDb("selftest-v4-from-v3.db");
+            using (var c = Open(v3Path))
+            {
+                // Synthesize the real v3 images shape (phash + favorite present, optimization cols ABSENT).
+                Exec(c, @"CREATE TABLE images (
+                  id INTEGER PRIMARY KEY,
+                  source_root TEXT NOT NULL, rel_path TEXT NOT NULL, abs_path TEXT NOT NULL,
+                  file_name TEXT NOT NULL, ext TEXT NOT NULL,
+                  size_bytes INTEGER NOT NULL, mtime_ticks INTEGER NOT NULL,
+                  width INTEGER, height INTEGER, meta_format TEXT, meta_source TEXT,
+                  prompt TEXT NOT NULL DEFAULT '', negative TEXT NOT NULL DEFAULT '',
+                  params_json TEXT, thumb_path TEXT,
+                  original_state TEXT NOT NULL DEFAULT 'present',
+                  archived INTEGER NOT NULL DEFAULT 0,
+                  scanned_at TEXT NOT NULL, phash INTEGER,
+                  favorite INTEGER NOT NULL DEFAULT 0,
+                  UNIQUE(abs_path));");
+                Exec(c, "CREATE TABLE meta ( k TEXT PRIMARY KEY, v TEXT );");
+                Exec(c, "INSERT INTO meta(k,v) VALUES('schema_version','3');");
+                for (int i = 1; i <= 3; i++)
+                    Exec(c, $"INSERT INTO images(source_root,rel_path,abs_path,file_name,ext,size_bytes,mtime_ticks,scanned_at) VALUES('r','v{i}.png','v{i}.png','v{i}.png','.png',1,1,'t');");
+                Exec(c, "UPDATE images SET favorite=1 WHERE abs_path='v1.png';");  // a v3 user-state value to preserve
+            }
+            using (new LibraryDb(v3Path)) { }   // opening migrates v3 → v4
+            using (var c = Open(v3Path))
+            {
+                Check("v3→v4: schema_version migrated to current", L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion);
+                Check("v3→v4: optimized column added", HasCol(c, "images", "optimized"));
+                Check("v3→v4: opt_dim + opt_at columns added", HasCol(c, "images", "opt_dim") && HasCol(c, "images", "opt_at"));
+                Check("v3→v4: 3 rows preserved, all optimized=0",
+                    L(c, "SELECT COUNT(*) FROM images;") == 3 && L(c, "SELECT COUNT(*) FROM images WHERE optimized=0;") == 3);
+                Check("v3→v4: pre-existing favorite preserved (metadata-only)", L(c, "SELECT favorite FROM images WHERE abs_path='v1.png';") == 1);
+                Check("v3→v4: ix_images_optimized built", Obj(c, "index", "ix_images_optimized"));
+            }
+            using (new LibraryDb(v3Path)) { }   // re-open: must be a no-op
+            using (var c = Open(v3Path))
+                Check("v3→v4: re-open idempotent (still current)",
+                    L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion && HasCol(c, "images", "optimized"));
+
+            // ---- Part 3: MarkOptimized moves a row into the store keeping id + user-state; ----
+            // ---- 'optimized' survives a rescan; re-scanning the in-store path makes NO second row (R16) ----
+            var store = AppPaths.EnsureLibraryStore();
+            var statePath = FreshDb("selftest-v4-state.db");
+            using (var db = new LibraryDb(statePath))
+            {
+                ImageRow Row(string src, string abs, params string[] tags) => new()
+                {
+                    SourceRoot = src, RelPath = abs, AbsPath = abs, FileName = Path.GetFileName(abs), Ext = ".png",
+                    SizeBytes = 100, MtimeTicks = 1, MetaFormat = "a1111", MetaSource = "embedded",
+                    Prompt = "p", Negative = "n", ScannedAt = "2026-06-25", Tags = tags.ToList()
+                };
+
+                var origAbs = Path.GetFullPath(Path.Combine(store, "..", "orig", "X.png")); // an original outside the store
+                db.Upsert(Row("C:\\src", origAbs, "alpha", "beta"));
+                long id = db.FindIdByAbsPath(origAbs)!.Value;
+
+                // Attach v3 user-state directly (these are id-keyed, so they must follow a MarkOptimized move).
+                using (var c = Open(statePath))
+                {
+                    Exec(c, $"UPDATE images SET favorite=1 WHERE id={id};");
+                    Exec(c, $"INSERT INTO image_notes(image_id,body,updated_at) VALUES ({id},'keep me','2026-06-25');");
+                    Exec(c, $"INSERT INTO user_tags(image_id,token) VALUES ({id},'mine');");
+                    Exec(c, "INSERT INTO collections(name) VALUES ('Faves');");
+                    Exec(c, $"INSERT INTO collection_items(collection_id,image_id) SELECT id,{id} FROM collections WHERE name='Faves';");
+                }
+
+                // Optimize: resampled file now lives in the store, mirrored under a per-root slug.
+                var newAbs = Path.GetFullPath(Path.Combine(store, "src-slug", "X.png"));
+                const string at = "2026-06-25T12:00:00";
+                db.MarkOptimized(id, newAbs, 1024, at);
+
+                var moved = db.GetById(id)!;
+                Check("MarkOptimized: SAME id", db.FindIdByAbsPath(newAbs) == id);
+                Check("MarkOptimized: abs_path repointed into store", moved.AbsPath == newAbs);
+                Check("MarkOptimized: source_root = store root", moved.SourceRoot == store);
+                Check("MarkOptimized: rel_path is store-relative", moved.RelPath == Path.GetRelativePath(store, newAbs));
+                Check("MarkOptimized: optimized flag set", moved.Optimized);
+                Check("MarkOptimized: opt_dim recorded", moved.OptDim == 1024);
+                Check("MarkOptimized: opt_at recorded", moved.OptAt == at);
+                Check("MarkOptimized: old abs_path no longer resolves", db.FindIdByAbsPath(origAbs) is null);
+
+                // User-state followed the move (id-keyed FKs, same id).
+                using (var c = Open(statePath))
+                    Check("move: favorite/note/user_tag/collection all FOLLOW the id",
+                        L(c, $"SELECT favorite FROM images WHERE id={id};") == 1
+                        && L(c, $"SELECT COUNT(*) FROM image_notes WHERE image_id={id};") == 1
+                        && L(c, $"SELECT COUNT(*) FROM user_tags WHERE image_id={id};") == 1
+                        && L(c, $"SELECT COUNT(*) FROM collection_items WHERE image_id={id};") == 1);
+
+                // Simulated scan of the managed store: the in-store file is seen with a fresh tag set.
+                long before = db.ImageCount();
+                db.Upsert(Row(store, newAbs, "gamma", "delta")); // same abs_path → UPDATE, not INSERT
+                Check("rescan: NO second row created (R16 no-double-row)", db.ImageCount() == before);
+                Check("rescan: still the SAME id", db.FindIdByAbsPath(newAbs) == id);
+                Check("rescan: optimized SURVIVES (excluded from UpsertCore)", db.GetById(id)!.Optimized);
+                using (var c = Open(statePath))
+                    Check("rescan: tags rebuilt by the UPDATE (alpha gone, gamma in)",
+                        L(c, $"SELECT COUNT(*) FROM image_tags WHERE image_id={id} AND token='alpha';") == 0
+                        && L(c, $"SELECT COUNT(*) FROM image_tags WHERE image_id={id} AND token='gamma';") == 1);
+            }
+
+            // ---- Part 4: managed-store path + meta plumbing ----
+            Check("AppPaths.LibraryStoreDir is non-empty", !string.IsNullOrEmpty(AppPaths.LibraryStoreDir));
+            Check("EnsureLibraryStore creates the dir", Directory.Exists(AppPaths.EnsureLibraryStore()));
+            var metaPath = FreshDb("selftest-v4-meta.db");
+            using (var db = new LibraryDb(metaPath))
+            {
+                Check("library_store_root unset initially", db.GetLibraryStoreRoot() is null);
+                db.SetLibraryStoreRoot(AppPaths.LibraryStoreDir);
+                Check("library_store_root round-trips", db.GetLibraryStoreRoot() == AppPaths.LibraryStoreDir);
+            }
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL");
+            WriteResultNamed(log, "selftest-v4migrate-result.txt");
+            return ok ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            W("RESULT: FAIL (exception)");
+            W(ex.ToString());
+            WriteResultNamed(log, "selftest-v4migrate-result.txt");
+            return 2;
+        }
+    }
+
     private static ImageRow TestRow(string name, params string[] tags) => new()
     {
         SourceRoot = "C:\\s", RelPath = name, AbsPath = name, FileName = name, Ext = ".png",
         SizeBytes = 1, MtimeTicks = 1, MetaFormat = "a1111", MetaSource = "embedded",
         Prompt = "p", Negative = "n", ScannedAt = "t", Tags = tags.ToList()
     };
+
+    /// <summary>Write a real (blank) PNG of the given size; optionally inject an A1111 "parameters"
+    /// text chunk so the metadata-preservation path is exercised end-to-end.</summary>
+    private static void MakePng(string path, int w, int h, string? a1111)
+    {
+        using (var img = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgba32>(w, h))
+            SixLabors.ImageSharp.ImageExtensions.SaveAsPng(img, path);
+        if (a1111 is not null)
+        {
+            var bytes = File.ReadAllBytes(path);
+            var withMeta = PngWriter.WithTextChunks(bytes,
+                new List<(string, string)> { ("parameters", a1111 + "\nNegative prompt: bad anatomy\nSteps: 20, Sampler: Euler a, CFG scale: 7") });
+            File.WriteAllBytes(path, withMeta);
+        }
+    }
+
+    /// <summary>Write a real (blank) JPEG of the given size carrying an EXIF ImageDescription, so the
+    /// JPEG metadata-preservation path (R13 for non-PNG) is exercised end-to-end.</summary>
+    private static void MakeJpegExif(string path, int w, int h, string exifText)
+    {
+        using var img = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgba32>(w, h);
+        var exif = new SixLabors.ImageSharp.Metadata.Profiles.Exif.ExifProfile();
+        exif.SetValue(SixLabors.ImageSharp.Metadata.Profiles.Exif.ExifTag.ImageDescription, exifText);
+        img.Metadata.ExifProfile = exif;
+        SixLabors.ImageSharp.ImageExtensions.SaveAsJpeg(img, path);
+    }
+
+    /// <summary>T30 Library Optimization: resample→store→recycle over real PNG fixtures. Verifies
+    /// scope id-sets (all/selection/folder) + preview tally, the resample-into-store move (MarkOptimized
+    /// keeps the id + all v3 user-state), A1111 metadata preserved through the resample, the original
+    /// recycled after the store copy is verified (R15), no double-row on a store rescan (R16),
+    /// idempotency, already-small skip, RootSlug stability, and cancellation. NOTE: this self-test
+    /// genuinely sends a couple of tiny fixture PNGs to the Recycle Bin (they're recoverable) — that is
+    /// the real R15 path under test.</summary>
+    private static int OptimizeLibrarySelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        long L(SqliteConnection c, string sql) => Convert.ToInt64(Scalar(c, sql) ?? 0L);
+        const string MaxDimToken = "1girl";
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Library Optimization (T30) self-test");
+
+            var work = Path.Combine(AppPaths.ExeDir, "selftest-optlib-work");
+            if (Directory.Exists(work)) { try { Directory.Delete(work, true); } catch { } }
+            Directory.CreateDirectory(work);
+            Directory.CreateDirectory(Path.Combine(work, "sub"));
+
+            string bigA = Path.Combine(work, "big_a1111.png");
+            string small = Path.Combine(work, "small.png");
+            string bigSub = Path.Combine(work, "sub", "big_sub.png");
+            const string PROMPT = "masterpiece, " + MaxDimToken + ", solo, intricate forest";
+            MakePng(bigA, 2000, 1500, PROMPT);
+            MakePng(small, 300, 220, null);
+            MakePng(bigSub, 1800, 1200, null);
+
+            var dbPath = FreshDb("selftest-optlib.db");
+            using var db = new LibraryDb(dbPath);
+            ImageRow Row(string abs)
+            {
+                var (w, h) = ImageOptimizer.ReadDimensions(abs);
+                var fi = new FileInfo(abs);
+                return new ImageRow
+                {
+                    SourceRoot = work, AbsPath = abs, RelPath = Path.GetRelativePath(work, abs),
+                    FileName = Path.GetFileName(abs), Ext = Path.GetExtension(abs).ToLowerInvariant(),
+                    SizeBytes = fi.Length, MtimeTicks = fi.LastWriteTimeUtc.Ticks, Width = w, Height = h,
+                    MetaFormat = "a1111", MetaSource = "embedded", Prompt = "p", Negative = "n", ScannedAt = "t",
+                    Tags = new List<string>()
+                };
+            }
+            db.Upsert(Row(bigA)); db.Upsert(Row(small)); db.Upsert(Row(bigSub));
+            long idBig = db.FindIdByAbsPath(bigA)!.Value, idSmall = db.FindIdByAbsPath(small)!.Value, idSub = db.FindIdByAbsPath(bigSub)!.Value;
+            long countBefore = db.ImageCount();
+            Check("3 rows indexed", countBefore == 3);
+
+            // Attach v3 user-state to the big image (raw SQL — known schema) → must follow the move.
+            using (var c = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                c.Open(); Exec(c, "PRAGMA foreign_keys=ON;");
+                Exec(c, $"UPDATE images SET favorite=1 WHERE id={idBig};");
+                Exec(c, $"INSERT INTO image_notes(image_id,body,updated_at) VALUES ({idBig},'keep me','t');");
+                Exec(c, $"INSERT INTO user_tags(image_id,token) VALUES ({idBig},'mine');");
+                Exec(c, "INSERT INTO collections(name) VALUES ('Faves');");
+                Exec(c, $"INSERT INTO collection_items(collection_id,image_id) SELECT id,{idBig} FROM collections WHERE name='Faves';");
+            }
+
+            // ---- Scope id-sets + preview (maxDim-aware: the already-small image is NOT eligible) ----
+            var (pCount, pSkip, pBytes) = db.OptimizePreview("all", 1024, null);
+            Check("preview(all,1024): count=2 (the big ones), skip=1 (small within budget), bytes>0", pCount == 2 && pSkip == 1 && pBytes > 0);
+            Check("eligible(all,1024) = 2 ids (small excluded)", db.OptimizeEligibleIds("all", 1024, null).Count == 2);
+            var selBig = db.OptimizeEligibleIds("selection", 1024, new long[] { idBig });
+            Check("eligible(selection big) = the selected big id", selBig.Count == 1 && selBig[0] == idBig);
+            Check("eligible(selection small) = empty (already within budget)", db.OptimizeEligibleIds("selection", 1024, new long[] { idSmall }).Count == 0);
+            Check("eligible(selection, empty) = empty (no silent over-match)", db.OptimizeEligibleIds("selection", 1024, System.Array.Empty<long>()).Count == 0);
+            var folderIds = db.OptimizeEligibleIds("folder:sub", 1024, null);
+            Check("eligible(folder:sub) = just the subfolder id", folderIds.Count == 1 && folderIds[0] == idSub);
+
+            // ---- RootSlug ----
+            Check("RootSlug deterministic", LibraryOptimizer.RootSlug(work) == LibraryOptimizer.RootSlug(work));
+            Check("RootSlug disambiguates roots", LibraryOptimizer.RootSlug(work) != LibraryOptimizer.RootSlug(work + "X"));
+            Check("RootSlug filesystem-safe", !LibraryOptimizer.RootSlug(work).Contains('\\') && !LibraryOptimizer.RootSlug(work).Contains(':'));
+
+            // ---- Run the optimize. Pass an EXPLICIT id list incl. the small one to also exercise the
+            //      runtime already-small skip (eligible() would have pre-filtered it). ----
+            var res = LibraryOptimizer.Run(db, new long[] { idBig, idSmall, idSub }, 1024, thumbs: null, progress: null, ct: default);
+            Check("run: optimized=2 (the two large images)", res.Optimized == 2);
+            Check("run: skipped=1 (the already-small image, skipped at runtime)", res.Skipped == 1);
+            Check("run: failed=0", res.Failed == 0);
+            Check("run: recycleFailed=0", res.RecycleFailed == 0);
+            Check("run: freedBytes > 0 (space actually reclaimed)", res.FreedBytes > 0);
+
+            var rb = db.GetById(idBig)!;
+            Check("big: optimized flag set", rb.Optimized);
+            Check("big: opt_dim=1024", rb.OptDim == 1024);
+            Check("big: opt_at recorded", !string.IsNullOrEmpty(rb.OptAt));
+            Check("big: abs_path moved under the store", rb.AbsPath.StartsWith(AppPaths.LibraryStoreDir, StringComparison.OrdinalIgnoreCase));
+            Check("big: source_root = store root", rb.SourceRoot == AppPaths.LibraryStoreDir);
+            Check("big: rel_path is store-relative (under the root slug)", rb.RelPath.StartsWith(LibraryOptimizer.RootSlug(work)));
+            Check("big: format preserved (PNG→PNG, no transcode)", rb.Ext == ".png" && Path.GetExtension(rb.AbsPath).ToLowerInvariant() == ".png");
+            var (bw, bh) = ImageOptimizer.ReadDimensions(rb.AbsPath);
+            Check("big: actually downsampled to <= 1024", bw > 0 && bw <= 1024 && bh <= 1024);
+            var pm = ImageMetadataReader.Read(rb.AbsPath);
+            Check("big: A1111 metadata PRESERVED through resample", pm.Format == "a1111" && pm.Prompt.Contains(MaxDimToken));
+            Check("big: original RECYCLED (gone) + store copy present (R15)", !File.Exists(bigA) && File.Exists(rb.AbsPath));
+
+            using (var c = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                c.Open();
+                Check("big: favorite/note/user_tag/collection FOLLOW the move (same id)",
+                    L(c, $"SELECT favorite FROM images WHERE id={idBig};") == 1
+                    && L(c, $"SELECT COUNT(*) FROM image_notes WHERE image_id={idBig};") == 1
+                    && L(c, $"SELECT COUNT(*) FROM user_tags WHERE image_id={idBig};") == 1
+                    && L(c, $"SELECT COUNT(*) FROM collection_items WHERE image_id={idBig};") == 1);
+            }
+
+            var rs = db.GetById(idSmall)!;
+            Check("small: untouched (not optimized, path unchanged, file present)",
+                !rs.Optimized && rs.AbsPath == small && File.Exists(small));
+            Check("no double-row after optimize (R16)", db.ImageCount() == countBefore);
+
+            // ---- Idempotency / convergence: nothing is eligible anymore at 1024 ----
+            var elig2 = db.OptimizeEligibleIds("all", 1024, null);
+            Check("idempotent: eligible(all,1024) now empty (converged)", elig2.Count == 0);
+            var res2 = LibraryOptimizer.Run(db, elig2, 1024, thumbs: null, progress: null, ct: default);
+            Check("idempotent: re-run optimizes nothing", res2.Optimized == 0 && res2.Skipped == 0 && res2.Failed == 0);
+            Check("idempotent: still 3 rows, big still optimized", db.ImageCount() == countBefore && db.GetById(idBig)!.Optimized);
+            var (pCount2, pSkip2, _) = db.OptimizePreview("all", 1024, null);
+            Check("preview(all,1024): count=0, skip=3 (2 optimized + 1 within budget)", pCount2 == 0 && pSkip2 == 3);
+
+            // ---- R16: a store rescan upserts the same abs_path → UPDATE, not a new row ----
+            var storeAbs = db.GetById(idBig)!.AbsPath;
+            db.Upsert(new ImageRow
+            {
+                SourceRoot = AppPaths.LibraryStoreDir, AbsPath = storeAbs,
+                RelPath = Path.GetRelativePath(AppPaths.LibraryStoreDir, storeAbs),
+                FileName = Path.GetFileName(storeAbs), Ext = ".png",
+                SizeBytes = 1, MtimeTicks = 99, MetaFormat = "a1111", MetaSource = "embedded",
+                Prompt = "p", Negative = "n", ScannedAt = "t2", Tags = new List<string> { "x" }
+            });
+            Check("store rescan: no new row + same id + optimized survives",
+                db.ImageCount() == countBefore && db.FindIdByAbsPath(storeAbs) == idBig && db.GetById(idBig)!.Optimized);
+
+            // ---- R13 across formats: a JPEG's EXIF survives the resample (no transcode) ----
+            string bigJpg = Path.Combine(work, "big_exif.jpg");
+            const string EXIF_TOKEN = "EXIF-PROMPT-1girl-marker";
+            MakeJpegExif(bigJpg, 2000, 1500, EXIF_TOKEN);
+            db.Upsert(Row(bigJpg));
+            long idJpg = db.FindIdByAbsPath(bigJpg)!.Value;
+            var resJ = LibraryOptimizer.Run(db, new long[] { idJpg }, 1024, thumbs: null, progress: null, ct: default);
+            Check("jpeg: optimized=1", resJ.Optimized == 1);
+            var rj = db.GetById(idJpg)!;
+            Check("jpeg: format preserved (.jpg, no transcode)", Path.GetExtension(rj.AbsPath).ToLowerInvariant() == ".jpg");
+            using (var reloaded = SixLabors.ImageSharp.Image.Load(rj.AbsPath))
+            {
+                string uc = "";
+                var prof = reloaded.Metadata.ExifProfile;
+                if (prof is not null && prof.TryGetValue(SixLabors.ImageSharp.Metadata.Profiles.Exif.ExifTag.ImageDescription, out var v) && v is not null)
+                    uc = v.Value ?? "";
+                Check("jpeg: EXIF metadata SURVIVED the resample (R13)", uc.Contains(EXIF_TOKEN));
+            }
+
+            // ---- Bridge contract (optimizepreview reply + OptDoneReply shape) ----
+            var bridge = new GalleryBridge(db, r => $"https://full.local/{r.Id}");
+            using (var pj = System.Text.Json.JsonDocument.Parse(bridge.Handle("{\"type\":\"optimizepreview\",\"scope\":\"all\",\"maxDim\":1024}")!))
+            {
+                var e = pj.RootElement;
+                Check("bridge optimizepreview returns {type:optpreview,count,skip,bytes}",
+                    e.GetProperty("type").GetString() == "optpreview"
+                    && e.TryGetProperty("count", out _) && e.TryGetProperty("skip", out _) && e.TryGetProperty("bytes", out _));
+            }
+            using (var oj = System.Text.Json.JsonDocument.Parse(GalleryBridge.OptDoneReply(7, 3, 1, 0, 12345, 1)))
+            {
+                var e = oj.RootElement;
+                Check("bridge OptDoneReply shape (gen-echoed + counts + recycleFailed)",
+                    e.GetProperty("type").GetString() == "optdone" && e.GetProperty("gen").GetInt32() == 7
+                    && e.GetProperty("optimized").GetInt32() == 3 && e.GetProperty("recycleFailed").GetInt32() == 1);
+            }
+
+            // ---- Cancellation ----
+            string cbig = Path.Combine(work, "cancel_big.png");
+            MakePng(cbig, 2000, 1500, PROMPT);
+            using (var db2 = new LibraryDb(FreshDb("selftest-optlib-cancel.db")))
+            {
+                db2.Upsert(Row(cbig));
+                long cid = db2.FindIdByAbsPath(cbig)!.Value;
+                var cts = new CancellationTokenSource(); cts.Cancel();
+                bool threw = false;
+                try { LibraryOptimizer.Run(db2, db2.OptimizeEligibleIds("all", 1024, null), 1024, thumbs: null, progress: null, ct: cts.Token); }
+                catch (OperationCanceledException) { threw = true; }
+                Check("cancelled token aborts the run", threw);
+                Check("cancelled: image NOT optimized + original intact", !db2.GetById(cid)!.Optimized && File.Exists(cbig));
+            }
+
+            // Best-effort cleanup of the fixtures + the store dir this test created.
+            try { Directory.Delete(work, true); } catch { }
+            try { Directory.Delete(Path.Combine(AppPaths.LibraryStoreDir, LibraryOptimizer.RootSlug(work)), true); } catch { }
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL");
+            WriteResultNamed(log, "selftest-optimizelib-result.txt");
+            return ok ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            W("RESULT: FAIL (exception)");
+            W(ex.ToString());
+            WriteResultNamed(log, "selftest-optimizelib-result.txt");
+            return 2;
+        }
+    }
+
+    /// <summary>T31 Optimized indicator: OptimizedCount, the optimizedOnly Query filter (page==total
+    /// parity + AND-composition with search), ImageRow.Optimized mapping, and the bridge surfacing the
+    /// optimized flag on the page item / counts and optimized+optDim+optAt on inspect.</summary>
+    private static int OptIndicatorSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Optimized indicator (T31) self-test");
+            var path = FreshDb("selftest-optind.db");
+            using var db = new LibraryDb(path);
+            db.Upsert(TestRow("A.png", "1girl", "solo")); db.Upsert(TestRow("B.png", "1girl")); db.Upsert(TestRow("C.png", "landscape"));
+            long A = db.FindIdByAbsPath("A.png")!.Value, B = db.FindIdByAbsPath("B.png")!.Value;
+
+            // Mark A + B optimized directly (path-agnostic flag test — the move itself is T30's job).
+            using (var c = new SqliteConnection($"Data Source={path}"))
+            {
+                c.Open();
+                Exec(c, $"UPDATE images SET optimized=1, opt_dim=1024, opt_at='2026-06-26T10:00:00' WHERE id IN ({A},{B});");
+            }
+
+            Check("OptimizedCount = 2", db.OptimizedCount() == 2);
+            var opt = db.Query(SearchParser.Parse(""), 0, 100, includeArchived: true, optimizedOnly: true);
+            Check("optimizedOnly total = 2", opt.Total == 2);
+            Check("optimizedOnly page==total (no desync)", opt.Page.Count == opt.Total);
+            Check("rows carry Optimized=true", opt.Page.All(r => r.Optimized));
+            Check("OptDim/OptAt mapped by name", opt.Page.All(r => r.OptDim == 1024 && r.OptAt == "2026-06-26T10:00:00"));
+            Check("unfiltered total = 3", db.Query(SearchParser.Parse(""), 0, 100, true).Total == 3);
+            Check("optimized AND '1girl' = 2", db.Query(SearchParser.Parse("1girl"), 0, 100, true, optimizedOnly: true).Total == 2);
+            Check("optimized AND 'landscape' = 0", db.Query(SearchParser.Parse("landscape"), 0, 100, true, optimizedOnly: true).Total == 0);
+
+            var bridge = new GalleryBridge(db, r => $"https://full.local/{r.Id}");
+            using (var cd = System.Text.Json.JsonDocument.Parse(bridge.Handle("{\"type\":\"counts\"}")!))
+                Check("counts reply optimized = 2", cd.RootElement.GetProperty("optimized").GetInt32() == 2);
+            using (var pd = System.Text.Json.JsonDocument.Parse(bridge.Handle("{\"type\":\"query\",\"raw\":\"\",\"page\":0,\"size\":60,\"optimizedOnly\":true}")!))
+            {
+                Check("bridge optimizedOnly total = 2", pd.RootElement.GetProperty("total").GetInt32() == 2);
+                Check("page item carries optimized=true", pd.RootElement.GetProperty("items")[0].GetProperty("optimized").GetBoolean());
+            }
+            using (var id = System.Text.Json.JsonDocument.Parse(bridge.Handle($"{{\"type\":\"inspect\",\"id\":{A}}}")!))
+            {
+                var e = id.RootElement;
+                Check("inspect carries optimized/optDim/optAt",
+                    e.GetProperty("optimized").GetBoolean() && e.GetProperty("optDim").GetInt32() == 1024
+                    && e.GetProperty("optAt").GetString() == "2026-06-26T10:00:00");
+            }
+            using (var id = System.Text.Json.JsonDocument.Parse(bridge.Handle($"{{\"type\":\"inspect\",\"id\":{db.FindIdByAbsPath("C.png")!.Value}}}")!))
+                Check("inspect of an un-optimized image: optimized=false", !id.RootElement.GetProperty("optimized").GetBoolean());
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL"); WriteResultNamed(log, "selftest-optindicator-result.txt"); return ok ? 0 : 1;
+        }
+        catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-optindicator-result.txt"); return 2; }
+    }
+
+    /// <summary>Write a real PNG whose pixels are seeded random noise, so distinct seeds yield distinct
+    /// perceptual hashes (and a repeated seed yields byte-identical content → identical phash + size, for
+    /// the ambiguous-match path). Used by the re-link end-to-end test.</summary>
+    private static void MakeRandomPng(string path, int seed)
+    {
+        var rnd = new Random(seed);
+        using var img = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgba32>(16, 16);
+        img.ProcessPixelRows(acc =>
+        {
+            for (int y = 0; y < acc.Height; y++)
+            {
+                var row = acc.GetRowSpan(y);
+                for (int x = 0; x < row.Length; x++) { byte v = (byte)rnd.Next(256); row[x] = new SixLabors.ImageSharp.PixelFormats.Rgba32(v, v, v, 255); }
+            }
+        });
+        SixLabors.ImageSharp.ImageExtensions.SaveAsPng(img, path);
+    }
+
+    /// <summary>T32/F22 state-preserving re-link. Part 1 exercises the DB primitives directly: RepathRow
+    /// keeps the id + all id-keyed user-state (favorite/user-tag/collection); DisappearedCandidates only
+    /// surfaces gone+phashed rows; ApplyRelinks deletes the orphan then repaths the original + backfills
+    /// unconsumed orphan phashes. Part 2 runs the real LocalScanner move-detection pass end-to-end:
+    /// a unique exact-phash + equal-size move re-links (id + state survive, no net add, before prune);
+    /// an ambiguous (identical-content) move is left as new (no wrong-merge, R14); and a never-phashed
+    /// move falls back to prune+add (the documented limitation — no regression).</summary>
+    private static int RelinkSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        string MakeDir(string name) { var d = Path.Combine(AppPaths.ExeDir, name); if (Directory.Exists(d)) Directory.Delete(d, true); Directory.CreateDirectory(d); return d; }
+        ImageRow Row(string root, string rel, long? phash, long size) => new()
+        {
+            SourceRoot = root, RelPath = rel, AbsPath = Path.Combine(root, rel), FileName = Path.GetFileName(rel),
+            Ext = Path.GetExtension(rel), SizeBytes = size, MtimeTicks = 1, MetaFormat = "a1111",
+            Prompt = "p", Negative = "n", ScannedAt = "t", Phash = phash, Tags = new() { "x" }
+        };
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Re-link (T32/F22) self-test");
+
+            // ---------- Part 1: DB primitives ----------
+            using (var db = new LibraryDb(FreshDb("selftest-relink-db.db")))
+            {
+                db.Upsert(Row("C:\\src", "a\\one.png", 111L, 1000L));
+                long id = db.FindIdByAbsPath("C:\\src\\a\\one.png")!.Value;
+                db.SetFavorite(id, true); db.SetNote(id, "keepme");
+                var added = db.AddUserTags(id, "ztoken");
+                long col = db.CreateCollection("C1"); db.AddToCollection(col, new[] { id });
+
+                db.RepathRow(id, "C:\\src\\b\\moved.png", "C:\\src");
+                var r = db.GetById(id)!;
+                Check("RepathRow keeps the same id", r.Id == id);
+                Check("RepathRow updates abs_path", r.AbsPath == Path.GetFullPath("C:\\src\\b\\moved.png"));
+                Check("RepathRow recomputes rel_path", r.RelPath == "b\\moved.png");
+                Check("RepathRow keeps source_root", r.SourceRoot == "C:\\src");
+                Check("RepathRow: favorite survives the move", r.Favorite);
+                Check("RepathRow: user tag survives (search still finds it)", added.Count > 0 && db.Query(SearchParser.Parse(added[0]), 0, 100, true).Total == 1);
+                Check("RepathRow: collection membership survives", db.ListCollections().First(c => c.Id == col).Count == 1);
+
+                // DisappearedCandidates: gone+phashed qualifies; no-phash and still-seen do not.
+                db.Upsert(Row("C:\\src", "gone.png", 222L, 50L));
+                db.Upsert(Row("C:\\src", "nohash.png", null, 60L));
+                db.Upsert(Row("C:\\src", "here.png", 333L, 70L));
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Path.GetFullPath("C:\\src\\here.png") };
+                var cand = db.DisappearedCandidates(new[] { "C:\\src" }, seen);
+                Check("DisappearedCandidates surfaces the gone phashed row", cand.Any(c => c.Phash == 222L));
+                Check("…excludes the no-phash row", !cand.Any(c => c.Size == 60L));
+                Check("…excludes the still-seen row", !cand.Any(c => c.Phash == 333L));
+
+                // ApplyRelinks: delete orphan → repath original (state preserved) + backfill an unconsumed orphan.
+                using var db2 = new LibraryDb(FreshDb("selftest-relink-apply.db"));
+                db2.Upsert(Row("C:\\src", "old.png", 444L, 80L));
+                long oldId = db2.FindIdByAbsPath("C:\\src\\old.png")!.Value; db2.SetFavorite(oldId, true);
+                db2.Upsert(Row("C:\\src", "new.png", 444L, 80L));
+                long orphanId = db2.FindIdByAbsPath("C:\\src\\new.png")!.Value;
+                db2.Upsert(Row("C:\\src", "keep.png", null, 90L));
+                long keepId = db2.FindIdByAbsPath("C:\\src\\keep.png")!.Value;
+                int n = db2.ApplyRelinks(new[] { (oldId, "C:\\src\\new.png", "C:\\src", orphanId) },
+                                         new Dictionary<long, long> { { keepId, 999L } });
+                Check("ApplyRelinks returns the re-link count (1)", n == 1);
+                Check("ApplyRelinks: orphan row removed", db2.GetById(orphanId) is null);
+                Check("ApplyRelinks: original repathed onto the orphan's location", db2.FindIdByAbsPath(Path.GetFullPath("C:\\src\\new.png")) == oldId);
+                Check("ApplyRelinks: favorite preserved on the surviving row", db2.GetById(oldId)!.Favorite);
+                Check("ApplyRelinks: backfills phash for an unconsumed orphan", db2.GetById(keepId)!.Phash == 999L);
+                Check("ApplyRelinks: no duplicate rows (old.png 'new.png' + keep.png = 2)", db2.ImageCount(includeArchived: true) == 2);
+            }
+
+            // ---------- Part 2: end-to-end LocalScanner move detection ----------
+            // 2a) unique move re-links + preserves state.
+            {
+                var work = MakeDir("selftest-relink-e2e"); var orig = Path.Combine(work, "orig"); Directory.CreateDirectory(orig);
+                MakeRandomPng(Path.Combine(orig, "p1.png"), 1);
+                MakeRandomPng(Path.Combine(orig, "p2.png"), 2);
+                MakeRandomPng(Path.Combine(orig, "p3.png"), 3);
+                using var db = new LibraryDb(FreshDb("selftest-relink-scan.db"));
+                var s1 = new LocalScanner(db).Scan(new[] { work });
+                Check("e2e: initial scan added 3", s1.Added == 3);
+                Check("e2e: backfilled 3 phashes", db.BackfillPhashes() == 3);
+                long p1 = db.FindIdByAbsPath(Path.GetFullPath(Path.Combine(orig, "p1.png")))!.Value;
+                db.SetFavorite(p1, true); long col = db.CreateCollection("Keep"); db.AddToCollection(col, new[] { p1 });
+
+                var moved = Path.Combine(work, "moved"); Directory.CreateDirectory(moved);
+                var newP1 = Path.Combine(moved, "p1.png");
+                File.Move(Path.Combine(orig, "p1.png"), newP1);
+                var s2 = new LocalScanner(db).Scan(new[] { work });
+                Check("e2e: re-linked exactly 1", s2.ReLinked == 1);
+                Check("e2e: nothing pruned (move ≠ delete)", s2.Removed == 0);
+                Check("e2e: still 3 images (no duplicate)", db.ImageCount(includeArchived: true) == 3);
+                Check("e2e: moved file keeps p1's id", db.FindIdByAbsPath(Path.GetFullPath(newP1)) == p1);
+                Check("e2e: favorite survived the move", db.GetById(p1)!.Favorite);
+                Check("e2e: collection membership survived", db.ListCollections().First(c => c.Id == col).Count == 1);
+                Check("e2e: rel_path now under 'moved'", db.GetById(p1)!.RelPath == "moved\\p1.png");
+            }
+
+            // 2b) ambiguous (identical content) move → left as new, no wrong-merge.
+            {
+                var work = MakeDir("selftest-relink-ambig"); var orig = Path.Combine(work, "orig"); Directory.CreateDirectory(orig);
+                MakeRandomPng(Path.Combine(orig, "x1.png"), 7);
+                MakeRandomPng(Path.Combine(orig, "x2.png"), 7);   // identical seed → identical phash + size
+                using var db = new LibraryDb(FreshDb("selftest-relink-ambig.db"));
+                new LocalScanner(db).Scan(new[] { work }); db.BackfillPhashes();
+                db.SetFavorite(db.FindIdByAbsPath(Path.GetFullPath(Path.Combine(orig, "x1.png")))!.Value, true);
+                var moved = Path.Combine(work, "moved"); Directory.CreateDirectory(moved);
+                File.Move(Path.Combine(orig, "x1.png"), Path.Combine(moved, "x1.png"));
+                File.Move(Path.Combine(orig, "x2.png"), Path.Combine(moved, "x2.png"));
+                var s = new LocalScanner(db).Scan(new[] { work });
+                Check("ambiguous: re-linked 0 (no wrong-merge)", s.ReLinked == 0);
+                Check("ambiguous: reported 2 unmatched", s.Unmatched == 2);
+                Check("ambiguous: favorite NOT carried to a wrong row", db.FavoriteCount() == 0);
+                Check("ambiguous: 2 images (both re-added fresh)", db.ImageCount(includeArchived: true) == 2);
+            }
+
+            // 2c) never-phashed move → falls back to prune+add (documented limit, no regression).
+            {
+                var work = MakeDir("selftest-relink-nophash"); var orig = Path.Combine(work, "orig"); Directory.CreateDirectory(orig);
+                MakeRandomPng(Path.Combine(orig, "n1.png"), 11);
+                using var db = new LibraryDb(FreshDb("selftest-relink-nophash.db"));
+                new LocalScanner(db).Scan(new[] { work });   // NO BackfillPhashes → row has no phash
+                db.SetFavorite(db.FindIdByAbsPath(Path.GetFullPath(Path.Combine(orig, "n1.png")))!.Value, true);
+                var moved = Path.Combine(work, "moved"); Directory.CreateDirectory(moved);
+                File.Move(Path.Combine(orig, "n1.png"), Path.Combine(moved, "n1.png"));
+                var s = new LocalScanner(db).Scan(new[] { work });
+                Check("no-phash: re-linked 0 (can't match an un-hashed move)", s.ReLinked == 0);
+                Check("no-phash: 1 image (pruned + re-added)", db.ImageCount(includeArchived: true) == 1);
+                Check("no-phash: favorite lost (the documented limitation)", db.FavoriteCount() == 0);
+            }
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL"); WriteResultNamed(log, "selftest-relink-result.txt"); return ok ? 0 : 1;
+        }
+        catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-relink-result.txt"); return 2; }
+    }
+
+    /// <summary>T33/F24 folder navigation. Covers FolderTree (per-root grouping, nested rel-dirs,
+    /// recursive subtree counts), the Query folderPath filter (direct vs includeSubfolders, folderRoot
+    /// scoping so identical rel-dirs across roots don't merge, page==total parity, token AND-compose),
+    /// RepathFolder (batch repath keeps ids/user-state, nesting preserved, sibling roots untouched,
+    /// abs+rel updated), the bridge 'folders' reply + folderPath query pass-through, and FileOps.MoveFolder
+    /// (rename + collision throw).</summary>
+    private static int FoldersSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        string MakeDir(string name) { var d = Path.Combine(AppPaths.ExeDir, name); if (Directory.Exists(d)) Directory.Delete(d, true); Directory.CreateDirectory(d); return d; }
+        ImageRow Row(string root, string rel) => new()
+        {
+            SourceRoot = root, RelPath = rel, AbsPath = Path.Combine(root, rel), FileName = Path.GetFileName(rel),
+            Ext = ".png", SizeBytes = 1, MtimeTicks = 1, MetaFormat = "a1111", Prompt = "p", Negative = "n",
+            ScannedAt = "t", Tags = new() { "x" }
+        };
+        var Q = SearchParser.Parse("");
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Folders (T33/F24) self-test");
+            using var db = new LibraryDb(FreshDb("selftest-folders.db"));
+            db.Upsert(Row("C:\\R1", "top.png"));
+            db.Upsert(Row("C:\\R1", "characters\\a.png"));
+            db.Upsert(Row("C:\\R1", "characters\\b.png"));
+            db.Upsert(Row("C:\\R1", "characters\\heroes\\h1.png"));
+            db.Upsert(Row("C:\\R2", "characters\\x.png"));   // same rel-dir name, different root
+
+            // -- FolderTree --
+            var tree = db.FolderTree();
+            Check("FolderTree: 2 roots", tree.Count == 2);
+            var r1 = tree.First(t => t.Root == "C:\\R1");
+            Check("R1 recursive count = 4", r1.Count == 4);
+            var chars = r1.Children.First(c => c.Name == "characters");
+            Check("R1\\characters recursive count = 3", chars.Count == 3);
+            Check("characters.Path is 'characters'", chars.Path == "characters");
+            var heroes = chars.Children.First(c => c.Name == "heroes");
+            Check("nested 'heroes' count = 1", heroes.Count == 1);
+            Check("heroes.Path is 'characters\\heroes'", heroes.Path == "characters\\heroes");
+            Check("roots kept distinct (R2 not merged into R1)", tree.First(t => t.Root == "C:\\R2").Count == 1);
+
+            // -- Query folderPath filter --
+            var direct = db.Query(Q, 0, 100, true, folderPath: "characters", folderRoot: "C:\\R1");
+            Check("folderPath direct = 2 (a,b; not heroes)", direct.Total == 2);
+            Check("folderPath direct page==total", direct.Page.Count == direct.Total);
+            Check("folderPath subtree = 3", db.Query(Q, 0, 100, true, folderPath: "characters", folderRoot: "C:\\R1", includeSubfolders: true).Total == 3);
+            Check("folderRoot scoping: R2 characters = 1 (no cross-root merge)", db.Query(Q, 0, 100, true, folderPath: "characters", folderRoot: "C:\\R2").Total == 1);
+            Check("folderPath '' (root-level direct) = 1 (top.png)", db.Query(Q, 0, 100, true, folderPath: "", folderRoot: "C:\\R1").Total == 1);
+            Check("folderPath '' subtree = 4 (whole root)", db.Query(Q, 0, 100, true, folderPath: "", folderRoot: "C:\\R1", includeSubfolders: true).Total == 4);
+            Check("folderPath + token AND-compose = 3", db.Query(SearchParser.Parse("x"), 0, 100, true, folderPath: "characters", folderRoot: "C:\\R1", includeSubfolders: true).Total == 3);
+
+            // -- RepathFolder (rename characters → people within R1) --
+            long aId = db.FindIdByAbsPath(Path.Combine("C:\\R1", "characters\\a.png"))!.Value; db.SetFavorite(aId, true);
+            int moved = db.RepathFolder("C:\\R1", "characters", "people");
+            Check("RepathFolder moved 3 rows", moved == 3);
+            Check("RepathFolder: a.png now under 'people'", db.GetById(aId)!.RelPath == "people\\a.png");
+            Check("RepathFolder: abs_path updated too", db.GetById(aId)!.AbsPath == Path.GetFullPath(Path.Combine("C:\\R1", "people\\a.png")));
+            Check("RepathFolder: nested 'heroes' preserved", db.FindIdByAbsPath(Path.GetFullPath(Path.Combine("C:\\R1", "people\\heroes\\h1.png"))) is not null);
+            Check("RepathFolder: id preserved (favorite survives)", db.GetById(aId)!.Favorite);
+            Check("RepathFolder: source_root unchanged", db.GetById(aId)!.SourceRoot == "C:\\R1");
+            Check("RepathFolder: old 'characters' now empty in R1", db.Query(Q, 0, 100, true, folderPath: "characters", folderRoot: "C:\\R1", includeSubfolders: true).Total == 0);
+            Check("RepathFolder: new 'people' subtree = 3", db.Query(Q, 0, 100, true, folderPath: "people", folderRoot: "C:\\R1", includeSubfolders: true).Total == 3);
+            Check("RepathFolder: R2 'characters' untouched", db.Query(Q, 0, 100, true, folderPath: "characters", folderRoot: "C:\\R2").Total == 1);
+
+            // -- Bridge 'folders' reply + folderPath query pass-through --
+            var bridge = new GalleryBridge(db, x => "u");
+            using (var fd = System.Text.Json.JsonDocument.Parse(bridge.Handle("{\"type\":\"folders\"}")!))
+                Check("bridge 'folders' reply carries a 2-root tree", fd.RootElement.GetProperty("tree").GetArrayLength() == 2);
+            using (var qd = System.Text.Json.JsonDocument.Parse(bridge.Handle("{\"type\":\"query\",\"raw\":\"\",\"page\":0,\"size\":60,\"includeArchived\":true,\"folderPath\":\"people\",\"folderRoot\":\"C:\\\\R1\",\"includeSubfolders\":true}")!))
+                Check("bridge query folderPath subtree = 3", qd.RootElement.GetProperty("total").GetInt32() == 3);
+
+            // -- FileOps.MoveFolder on real dirs --
+            var fwork = MakeDir("selftest-folders-fs");
+            Directory.CreateDirectory(Path.Combine(fwork, "src")); File.WriteAllText(Path.Combine(fwork, "src", "f.txt"), "x");
+            FileOps.MoveFolder(Path.Combine(fwork, "src"), Path.Combine(fwork, "dst"));
+            Check("MoveFolder renamed the dir (src gone, dst present)", Directory.Exists(Path.Combine(fwork, "dst")) && !Directory.Exists(Path.Combine(fwork, "src")));
+            Directory.CreateDirectory(Path.Combine(fwork, "a")); Directory.CreateDirectory(Path.Combine(fwork, "b"));
+            bool threw = false; try { FileOps.MoveFolder(Path.Combine(fwork, "a"), Path.Combine(fwork, "b")); } catch (IOException) { threw = true; }
+            Check("MoveFolder throws on collision (no merge, no data loss)", threw);
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL"); WriteResultNamed(log, "selftest-folders-result.txt"); return ok ? 0 : 1;
+        }
+        catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-folders-result.txt"); return 2; }
+    }
+
+    /// <summary>T34/F23 file-manager host ops (logic-testable parts): RenameRow (file_name + path cols,
+    /// id/state preserved), SetFavoriteBulk, the in-library move (the FileOps.Move + RepathRow sequence
+    /// HandleMoveToFolder performs — keeps id + favorite + collection, physically relocates, folder tree
+    /// reflects it), and moveto→collection (AddToCollection). The WinForms intercepts are thin wrappers
+    /// over these; the rendered bar/overflow/picker are the AC6 in-app user check.</summary>
+    private static int FileManagerSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        string MakeDir(string name) { var d = Path.Combine(AppPaths.ExeDir, name); if (Directory.Exists(d)) Directory.Delete(d, true); Directory.CreateDirectory(d); return d; }
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — File-manager ops (T34/F23) self-test");
+
+            // ---- RenameRow + SetFavoriteBulk (unit) ----
+            using (var db = new LibraryDb(FreshDb("selftest-fm-unit.db")))
+            {
+                ImageRow Row(string root, string rel) => new()
+                {
+                    SourceRoot = root, RelPath = rel, AbsPath = Path.Combine(root, rel), FileName = Path.GetFileName(rel),
+                    Ext = Path.GetExtension(rel), SizeBytes = 1, MtimeTicks = 1, MetaFormat = "a1111", Prompt = "p", Negative = "n", ScannedAt = "t", Tags = new() { "x" }
+                };
+                db.Upsert(Row("C:\\s", "a\\one.png")); db.Upsert(Row("C:\\s", "a\\two.png")); db.Upsert(Row("C:\\s", "b\\three.png"));
+                long a = db.FindIdByAbsPath("C:\\s\\a\\one.png")!.Value, b = db.FindIdByAbsPath("C:\\s\\a\\two.png")!.Value, c = db.FindIdByAbsPath("C:\\s\\b\\three.png")!.Value;
+                db.SetFavorite(a, true);
+
+                db.RenameRow(a, "C:\\s\\a\\renamed.png", "C:\\s");
+                var r = db.GetById(a)!;
+                Check("RenameRow keeps id", r.Id == a);
+                Check("RenameRow updates file_name", r.FileName == "renamed.png");
+                Check("RenameRow updates abs_path", r.AbsPath == Path.GetFullPath("C:\\s\\a\\renamed.png"));
+                Check("RenameRow updates rel_path", r.RelPath == "a\\renamed.png");
+                Check("RenameRow keeps favorite (id preserved)", r.Favorite);
+
+                db.SetFavoriteBulk(new[] { a, b, c }, true);
+                Check("SetFavoriteBulk on → FavoriteCount 3", db.FavoriteCount() == 3);
+                db.SetFavoriteBulk(new[] { a, b }, false);
+                Check("SetFavoriteBulk off → FavoriteCount 1", db.FavoriteCount() == 1);
+            }
+
+            // ---- end-to-end in-library move (the exact ops HandleMoveToFolder performs) ----
+            {
+                var work = MakeDir("selftest-fm-move"); var src = Path.Combine(work, "src"); Directory.CreateDirectory(src);
+                MakeRandomPng(Path.Combine(src, "m1.png"), 21); MakeRandomPng(Path.Combine(src, "m2.png"), 22);
+                using var db = new LibraryDb(FreshDb("selftest-fm-move.db"));
+                new LocalScanner(db).Scan(new[] { work });
+                long m1 = db.FindIdByAbsPath(Path.GetFullPath(Path.Combine(src, "m1.png")))!.Value;
+                db.SetFavorite(m1, true); long col = db.CreateCollection("Keep"); db.AddToCollection(col, new[] { m1 });
+
+                var destDir = Path.Combine(work, "sorted", "best"); Directory.CreateDirectory(destDir);
+                var row = db.GetById(m1)!; var dest = FileOps.UniqueDestination(destDir, row.FileName);
+                FileOps.Move(row.AbsPath, dest); db.RepathRow(m1, dest, work);
+
+                Check("move: file physically relocated", File.Exists(dest) && !File.Exists(Path.Combine(src, "m1.png")));
+                var moved = db.GetById(m1)!;
+                Check("move: same id", moved.Id == m1);
+                Check("move: favorite survives", moved.Favorite);
+                Check("move: collection membership survives", db.ListCollections().First(x => x.Id == col).Count == 1);
+                Check("move: rel_path under new folder", moved.RelPath == "sorted\\best\\m1.png");
+                Check("move: still 2 images (no dup, no prune)", db.ImageCount(includeArchived: true) == 2);
+
+                var names = new List<string>();
+                void Collect(IReadOnlyList<FolderNode> ns) { foreach (var n in ns) { names.Add(n.Name); Collect(n.Children); } }
+                Collect(db.FolderTree());
+                Check("move: FolderTree shows the new 'sorted'/'best' folders", names.Contains("sorted") && names.Contains("best"));
+
+                db.AddToCollection(col, new[] { db.FindIdByAbsPath(Path.GetFullPath(Path.Combine(src, "m2.png")))!.Value });
+                Check("moveto→collection adds the 2nd image", db.ListCollections().First(x => x.Id == col).Count == 2);
+            }
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL"); WriteResultNamed(log, "selftest-filemanager-result.txt"); return ok ? 0 : 1;
+        }
+        catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-filemanager-result.txt"); return 2; }
+    }
 
     /// <summary>T24 Favorites: SetFavorite/FavoriteCount, ImageRow.Favorite mapping, the favoritesOnly
     /// query filter (page==total parity + AND-composition), rescan survival, and the bridge counts/page.</summary>

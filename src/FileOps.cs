@@ -70,4 +70,26 @@ public static class FileOps
         try { File.Move(src, dest); }
         catch (IOException) { File.Copy(src, dest, false); File.Delete(src); }
     }
+
+    /// <summary>Rename/move a whole directory (T33/F24 in-app folder rename). Throws if the
+    /// destination already exists (the caller surfaces the collision — no data loss, no merge).
+    /// Same-volume renames are atomic via Directory.Move; a cross-volume move falls back to a
+    /// recursive copy + delete. The DB row repath is done separately by LibraryDb.RepathFolder.</summary>
+    public static void MoveFolder(string src, string dst)
+    {
+        if (string.Equals(Path.GetFullPath(src), Path.GetFullPath(dst), StringComparison.OrdinalIgnoreCase))
+            return; // no-op (e.g. case-only rename on a case-insensitive FS) — let the DB repath proceed
+        if (Directory.Exists(dst)) throw new IOException($"A folder named \"{Path.GetFileName(dst)}\" already exists here.");
+        try { Directory.Move(src, dst); }
+        catch (IOException) { CopyDir(src, dst); Directory.Delete(src, recursive: true); }
+    }
+
+    private static void CopyDir(string src, string dst)
+    {
+        Directory.CreateDirectory(dst);
+        foreach (var dir in Directory.GetDirectories(src, "*", SearchOption.AllDirectories))
+            Directory.CreateDirectory(Path.Combine(dst, Path.GetRelativePath(src, dir)));
+        foreach (var file in Directory.GetFiles(src, "*", SearchOption.AllDirectories))
+            File.Copy(file, Path.Combine(dst, Path.GetRelativePath(src, file)), overwrite: false);
+    }
 }

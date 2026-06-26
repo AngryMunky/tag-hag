@@ -41,6 +41,8 @@ public sealed class GalleryBridge
                 "tagadd" => HandleTagAdd(root),
                 "tagdel" => HandleTagDel(root),
                 "cols" => HandleCols(),
+                "folders" => HandleFolders(),
+                "optimizepreview" => HandleOptimizePreview(root),
                 _ => null
             };
         }
@@ -56,11 +58,17 @@ public sealed class GalleryBridge
         var untaggedOnly = root.TryGetProperty("untaggedOnly", out var uo) && uo.ValueKind == JsonValueKind.True;
         var archivedOnly = root.TryGetProperty("archivedOnly", out var ao) && ao.ValueKind == JsonValueKind.True;
         var favoritesOnly = root.TryGetProperty("favoritesOnly", out var fo) && fo.ValueKind == JsonValueKind.True;
+        var optimizedOnly = root.TryGetProperty("optimizedOnly", out var oo) && oo.ValueKind == JsonValueKind.True;   // T31
         long? collectionId = root.TryGetProperty("collectionId", out var ci) && ci.ValueKind == JsonValueKind.Number ? ci.GetInt64() : (long?)null;
+        // Folder view (T33): folderPath is a rel-DIR ("" = root-level), folderRoot scopes it to one
+        // source root, includeSubfolders widens to the subtree. Present together or not at all.
+        var folderPath = root.TryGetProperty("folderPath", out var fp) && fp.ValueKind == JsonValueKind.String ? fp.GetString() : null;
+        var folderRoot = root.TryGetProperty("folderRoot", out var fr) && fr.ValueKind == JsonValueKind.String ? fr.GetString() : null;
+        var includeSubfolders = root.TryGetProperty("includeSubfolders", out var isf) && isf.ValueKind == JsonValueKind.True;
         // Generation token: the page echoes it so the client can drop replies from a superseded query.
         var gen = root.TryGetProperty("gen", out var g) && g.ValueKind == JsonValueKind.Number ? g.GetInt32() : 0;
 
-        var (rows, total) = _db.Query(SearchParser.Parse(raw), page, size, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId);
+        var (rows, total) = _db.Query(SearchParser.Parse(raw), page, size, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders);
         var items = rows.Select(x => new
         {
             id = x.Id,
@@ -68,7 +76,8 @@ public sealed class GalleryBridge
             fileName = x.FileName,
             format = x.MetaFormat,
             prompt = x.Prompt,
-            favorite = x.Favorite
+            favorite = x.Favorite,
+            optimized = x.Optimized      // T31 — drives the ✨O card badge
         });
         return JsonSerializer.Serialize(new { type = "page", page, total, gen, items }, Json);
     }
@@ -80,8 +89,26 @@ public sealed class GalleryBridge
         long bog = _db.ImageCount(includeArchived: true) - all;
         long unsorted = _db.UntaggedCount();
         long favorites = _db.FavoriteCount();
-        return JsonSerializer.Serialize(new { type = "counts", all, unsorted, bog, favorites }, Json);
+        long optimized = _db.OptimizedCount();   // T31
+        return JsonSerializer.Serialize(new { type = "counts", all, unsorted, bog, favorites, optimized }, Json);
     }
+
+    /// <summary>T30 Library Optimization preview: a cheap (count, skip, est bytes) tally for a scope at a
+    /// target size. scope = "all" | "selection" (with ids[]) | "folder:&lt;rel-path-prefix&gt;".</summary>
+    private string HandleOptimizePreview(JsonElement root)
+    {
+        var scope = root.TryGetProperty("scope", out var sc) ? sc.GetString() ?? "all" : "all";
+        var maxDim = root.TryGetProperty("maxDim", out var md) && md.ValueKind == JsonValueKind.Number ? md.GetInt32() : ImageOptimizer.DefaultMaxDim;
+        long[]? ids = root.TryGetProperty("ids", out var a) && a.ValueKind == JsonValueKind.Array
+            ? a.EnumerateArray().Select(x => x.GetInt64()).ToArray() : null;
+        var (count, skip, bytes) = _db.OptimizePreview(scope, maxDim, ids);
+        return JsonSerializer.Serialize(new { type = "optpreview", count, skip, bytes }, Json);
+    }
+
+    /// <summary>T30: gen-echoed completion reply for the background optimize job (the client drops a
+    /// superseded run by gen). recycleFailed = optimized images whose original couldn't be recycled.</summary>
+    public static string OptDoneReply(int gen, int optimized, int skipped, int failed, long freedBytes, int recycleFailed) =>
+        JsonSerializer.Serialize(new { type = "optdone", gen, optimized, skipped, failed, freedBytes, recycleFailed }, Json);
 
     private string HandleAutocomplete(JsonElement root)
     {
@@ -119,6 +146,15 @@ public sealed class GalleryBridge
     {
         var items = _db.ListCollections().Select(c => new { id = c.Id, name = c.Name, count = c.Count });
         return JsonSerializer.Serialize(new { type = "cols", items }, Json);
+    }
+
+    // -- Folder tree read (T33/F24): the physical-folder navigation tree for the sidebar (distinct
+    // from logical Collections). Derived from (source_root, rel_path); nodes carry Root/Path/Name/Count
+    // /Children and serialize camelCase (root/path/name/count/children). Rename is host-side. --
+    private string HandleFolders()
+    {
+        var tree = _db.FolderTree();
+        return JsonSerializer.Serialize(new { type = "folders", tree }, Json);
     }
 
     private string? HandleInspect(JsonElement root)
@@ -168,7 +204,10 @@ public sealed class GalleryBridge
             note = note?.Body,                    // T25 — null when no note (lightbox hides it)
             noteUpdatedAt = note?.UpdatedAt,
             promptTags = _db.PromptTagsFor(row.Id),  // T26 — read-only Charms
-            userTags = _db.UserTagsFor(row.Id)       // T26 — removable manual tags
+            userTags = _db.UserTagsFor(row.Id),      // T26 — removable manual tags
+            optimized = row.Optimized,            // T31 — INFO "Optimized" line
+            optDim = row.OptDim,
+            optAt = row.OptAt
         }, Json);
     }
 
@@ -189,6 +228,7 @@ public sealed class GalleryBridge
                     fileName = row.FileName,
                     format = row.MetaFormat,
                     prompt = row.Prompt,
+                    optimized = row.Optimized,   // T31 — ✨O badge shows in the dupes view too
                     group = g + 1
                 });
             }

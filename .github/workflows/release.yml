@@ -1,0 +1,92 @@
+name: Release
+
+# Builds the portable, single-file, self-contained Windows .exe and attaches it to a
+# GitHub Release. Runs when a version tag (v*) is pushed; also runnable by hand against
+# an existing tag via the Actions tab. The build recipe mirrors the local one exactly:
+# everything (RID win-x64 / SelfContained / PublishSingleFile / compression) is baked
+# into TheTagHag.csproj, so `dotnet publish` reproduces the same artifact on the runner.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release (e.g. v2.1.0)'
+        required: true
+
+permissions:
+  contents: write          # required to create/update the GitHub Release
+
+jobs:
+  build-release:
+    runs-on: windows-latest   # WinForms + WebView2 are Windows-only; the runner is Windows.
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Resolve tag + version
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $tag = $env:GITHUB_REF_NAME }
+          else { $tag = '${{ github.event.inputs.tag }}' }
+          if (-not $tag) { throw 'No tag could be resolved.' }
+          $version = $tag.TrimStart('v')
+          "tag=$tag"         >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Building $tag (version $version)"
+
+      - name: Publish single-file self-contained exe
+        shell: pwsh
+        run: dotnet publish TheTagHag.csproj -c Release -o publish --nologo
+
+      - name: Verify the exe version matches the tag
+        shell: pwsh
+        run: |
+          $exe = 'publish/TheTagHag.exe'
+          if (-not (Test-Path $exe)) { throw "Publish produced no exe at $exe" }
+          $fv   = (Get-Item $exe).VersionInfo.FileVersion
+          $want = '${{ steps.ver.outputs.version }}'
+          Write-Host "exe FileVersion=$fv   tag version=$want"
+          if (-not $fv.StartsWith($want)) {
+            throw "Version mismatch: the exe is $fv but the tag is v$want. Bump <Version> in TheTagHag.csproj to match the tag before releasing."
+          }
+
+      - name: Name the release asset
+        id: asset
+        shell: pwsh
+        run: |
+          $name = "TheTagHag-${{ steps.ver.outputs.tag }}-win-x64.exe"
+          Copy-Item 'publish/TheTagHag.exe' "publish/$name" -Force
+          "path=publish/$name" >> $env:GITHUB_OUTPUT
+          "name=$name"         >> $env:GITHUB_OUTPUT
+
+      - name: Create or update the GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag   = '${{ steps.ver.outputs.tag }}'
+          $asset = '${{ steps.asset.outputs.path }}'
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag already exists - uploading asset (clobber)."
+            gh release upload $tag $asset --clobber
+          } else {
+            Write-Host "Creating release $tag."
+            gh release create $tag $asset --title "The Tag Hag $tag" --generate-notes
+          }
+
+      - name: Upload the build artifact (always downloadable from the run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: TheTagHag-${{ steps.ver.outputs.tag }}-win-x64
+          path: ${{ steps.asset.outputs.path }}
+          if-no-files-found: error

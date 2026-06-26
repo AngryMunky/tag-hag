@@ -34,6 +34,19 @@ public static class AppPaths
     /// <summary>Thumbnail cache (lazy + pre-warmed WebP thumbnails).</summary>
     public static string ThumbsDir => Path.Combine(ExeDir, "thumbs");
 
+    /// <summary>The Tag Hag-managed library store (v2.1, architecture "model shift"). Optimizing an
+    /// image resamples it into here — mirroring its source rel-path under a per-root slug — and
+    /// recycles the original. Portable (beside the exe) and itself a SCANNED managed root, so its
+    /// contents stay indexed. See LibraryDb.MarkOptimized + LocalScanner.</summary>
+    public static string LibraryStoreDir => Path.Combine(ExeDir, "library-store");
+
+    /// <summary>Create the managed store directory if absent; returns its path.</summary>
+    public static string EnsureLibraryStore()
+    {
+        Directory.CreateDirectory(LibraryStoreDir);
+        return LibraryStoreDir;
+    }
+
     /// <summary>Civitai harvest output (images\ + dataset.jsonl + state.json). Add as a source root to index.</summary>
     public static string CivitaiDir => Path.Combine(ExeDir, "civitai");
 }

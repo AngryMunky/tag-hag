@@ -3,7 +3,10 @@ using System.Text.Json;
 
 namespace TheTagHag;
 
-public readonly record struct ScanResult(int Added, int Updated, int Unchanged, int Removed, int Failed);
+/// <summary>Scan outcome. <c>ReLinked</c> = moved/renamed files matched back to their original row by
+/// content (id + user-state preserved, T32/F22); <c>Unmatched</c> = phashed files that vanished and had
+/// candidate look-alikes but couldn't be safely auto-linked (ambiguous → left as new, R14).</summary>
+public readonly record struct ScanResult(int Added, int Updated, int Unchanged, int Removed, int Failed, int ReLinked = 0, int Unmatched = 0);
 
 /// <summary>
 /// Scans source roots recursively, reads metadata, and keeps library.db in sync:
@@ -65,10 +68,43 @@ public sealed class LocalScanner
         int added = parsed.Count(x => !x.Existed);
         int updated = parsed.Count(x => x.Existed);
 
-        // 4) Prune rows whose file is gone.
+        // 3b) Re-link moved/renamed files BEFORE prune (T32/F22): a file that moved shows up as a NEW
+        // orphan row at its new path while its old row's file "disappeared". Match each disappeared
+        // *phashed* row to a freshly-inserted orphan by UNIQUE exact phash + equal size, then fold the
+        // orphan back into the original row (delete orphan, repath original) so the id — and every
+        // favorite/note/tag/collection/archived bit hanging off it — survives the move. Unique-only:
+        // any ambiguity is left as new (no wrong-merge, R14). Running before prune guarantees a move is
+        // never read as delete+add. The pass is skipped entirely when nothing phashed disappeared, so a
+        // plain add-only scan pays nothing.
+        int reLinked = 0, unmatched = 0;
+        var disappeared = _db.DisappearedCandidates(roots, seen);
+        if (disappeared.Count > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            var orphans = parsed.Where(x => !x.Existed).Select(x => x.Row).ToList(); // new rows (ids set by upsert)
+            var orphanHash = new ConcurrentDictionary<long, long>();
+            Parallel.ForEach(orphans, opts, o => { var h = PerceptualHash.Compute(o.AbsPath); if (h is long hv) orphanHash[o.Id] = hv; });
+
+            var disByHash = disappeared.GroupBy(d => d.Phash).ToDictionary(g => g.Key, g => g.ToList());
+            var orphByHash = orphans.Where(o => orphanHash.ContainsKey(o.Id))
+                                    .GroupBy(o => orphanHash[o.Id]).ToDictionary(g => g.Key, g => g.ToList());
+            var relinks = new List<(long OldId, string NewAbs, string NewRoot, long OrphanId)>();
+            foreach (var (h, dis) in disByHash)
+            {
+                if (!orphByHash.TryGetValue(h, out var orph)) continue; // a phashed file just deleted → normal prune, not a re-link miss
+                if (dis.Count == 1 && orph.Count == 1 && orph[0].SizeBytes == dis[0].Size)
+                    relinks.Add((dis[0].Id, orph[0].AbsPath, orph[0].SourceRoot, orph[0].Id));
+                else
+                    unmatched += dis.Count;                             // ambiguous (≥2 either side) or size mismatch → leave as new
+            }
+            reLinked = _db.ApplyRelinks(relinks, orphanHash);
+            added -= reLinked;                                          // a re-linked orphan is a move, not an addition
+        }
+
+        // 4) Prune rows whose file is gone (re-linked rows now point at a seen, on-disk path → kept).
         int removed = _db.PruneMissing(roots, seen);
 
-        return new ScanResult(added, updated, unchanged, removed, failed + failedReads);
+        return new ScanResult(added, updated, unchanged, removed, failed + failedReads, reLinked, unmatched);
     }
 
     private static ImageRow BuildRow(string root, string abs, FileInfo fi)

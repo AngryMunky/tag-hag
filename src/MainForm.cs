@@ -23,6 +23,8 @@ public sealed class MainForm : Form
     private GalleryBridge _bridge = null!;
     private ThumbnailService _thumbs = null!;
     private bool _busy;
+    private int _optGen;                          // T30: generation token for the optimize job (drop stale replies)
+    private CancellationTokenSource? _optCts;     // T30: cancels the running optimize job
 
     public MainForm()
     {
@@ -50,6 +52,7 @@ public sealed class MainForm : Form
         _tb.ForeColor = Color.FromArgb(0xD8, 0xD0, 0xBF);
         _tb.Items.Add(Btn("Add source folder", AddSourceFolder));
         _tb.Items.Add(Btn("Scan", async () => await DoScan()));
+        _tb.Items.Add(Btn("Optimize Library…", OpenOptimizeLibrary));   // T30 / F20
         _tb.Items.Add(new ToolStripSeparator());
         _tb.Items.Add(Btn("Civitai", OpenCivitai));
         _tb.Items.Add(Btn("Settings", async () => await OpenSettings()));
@@ -214,6 +217,81 @@ public sealed class MainForm : Form
                 }
                 return;
             }
+            // T30 / F20 Library Optimization (the same bridge contract the top-bar dialog drives).
+            if (type == "optimizelib")
+            {
+                var scope = d.RootElement.TryGetProperty("scope", out var sc) ? sc.GetString() ?? "all" : "all";
+                var maxDim = d.RootElement.TryGetProperty("maxDim", out var md) && md.ValueKind == JsonValueKind.Number ? md.GetInt32() : _settings.MaxDim;
+                var gen = d.RootElement.TryGetProperty("gen", out var gg) && gg.ValueKind == JsonValueKind.Number ? gg.GetInt32() : 0;
+                long[]? oids = d.RootElement.TryGetProperty("ids", out var oa) && oa.ValueKind == JsonValueKind.Array
+                    ? oa.EnumerateArray().Select(x => x.GetInt64()).ToArray() : null;
+                _ = HandleOptimizeLibrary(scope, oids, maxDim, gen);
+                return;
+            }
+            if (type == "optimizecancel") { _optCts?.Cancel(); return; }
+            // T33 / F24 folder rename: physically rename the folder, then repath every indexed row
+            // under it in one tx (ids + user-state preserved). Disk move runs first, so a collision/
+            // error leaves the DB untouched (no data loss). Silent (pushes {type:'reload'}).
+            if (type == "folderrename")
+            {
+                var froot = d.RootElement.TryGetProperty("root", out var rr) ? rr.GetString() : null;
+                var oldRel = d.RootElement.TryGetProperty("path", out var pp) ? pp.GetString() : null;
+                var newName = d.RootElement.TryGetProperty("name", out var nn) ? nn.GetString()?.Trim() : null;
+                HandleFolderRename(froot, oldRel, newName);
+                return;
+            }
+            // T34 / F23 file-manager verbs (action bar). All host-side (file ops + DB), reply via reload.
+            if (type == "moveto")
+            {
+                var kind = d.RootElement.TryGetProperty("targetKind", out var tk) ? tk.GetString() : null;
+                var mids = d.RootElement.TryGetProperty("ids", out var ma) && ma.ValueKind == JsonValueKind.Array
+                    ? ma.EnumerateArray().Select(x => x.GetInt64()).ToArray() : Array.Empty<long>();
+                if (kind == "collection")
+                {
+                    if (d.RootElement.TryGetProperty("collectionId", out var cidEl) && mids.Length > 0)
+                    {
+                        _db.AddToCollection(cidEl.GetInt64(), mids);
+                        PushCols();
+                        _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
+                    }
+                }
+                else // 'folder'
+                {
+                    var mroot = d.RootElement.TryGetProperty("root", out var mr) ? mr.GetString() : null;
+                    var mpath = d.RootElement.TryGetProperty("path", out var mp) ? mp.GetString() ?? "" : "";
+                    _ = HandleMoveToFolder(mids, mroot, mpath);
+                }
+                return;
+            }
+            if (type == "rename")
+            {
+                if (d.RootElement.TryGetProperty("id", out var ridEl))
+                {
+                    var rn = d.RootElement.TryGetProperty("name", out var rnm) ? rnm.GetString() : null;
+                    HandleRename(ridEl.GetInt64(), rn);
+                }
+                return;
+            }
+            if (type == "newfolder")
+            {
+                var nroot = d.RootElement.TryGetProperty("root", out var nr) ? nr.GetString() : null;
+                var nparent = d.RootElement.TryGetProperty("parent", out var np) ? np.GetString() ?? "" : "";
+                var nfn = d.RootElement.TryGetProperty("name", out var nfm) ? nfm.GetString()?.Trim() : null;
+                HandleNewFolder(nroot, nparent, nfn);
+                return;
+            }
+            if (type == "favbulk")
+            {
+                var fids = d.RootElement.TryGetProperty("ids", out var fa) && fa.ValueKind == JsonValueKind.Array
+                    ? fa.EnumerateArray().Select(x => x.GetInt64()).ToArray() : Array.Empty<long>();
+                var on = d.RootElement.TryGetProperty("on", out var onEl) && onEl.ValueKind == JsonValueKind.True;
+                if (fids.Length > 0)
+                {
+                    _db.SetFavoriteBulk(fids, on);
+                    _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
+                }
+                return;
+            }
         }
         catch { /* not JSON / no type → fall through to bridge */ }
 
@@ -335,6 +413,12 @@ public sealed class MainForm : Form
         _busy = true;
         SetStatus("Scanning…");
         var roots = _settings.SourceRoots.ToList();
+        // v2.1: the Tag Hag-managed store is always a scanned (managed) root, so optimized images
+        // moved into it stay indexed. It's implicit — not shown in Settings' source list — so it's
+        // added here at scan time rather than persisted to SourceRoots. Record it in meta too.
+        var storeRoot = AppPaths.EnsureLibraryStore();
+        if (!roots.Contains(storeRoot, StringComparer.OrdinalIgnoreCase)) roots.Add(storeRoot);
+        _db.SetLibraryStoreRoot(storeRoot);
         ScanResult r = default;
         try
         {
@@ -345,12 +429,136 @@ public sealed class MainForm : Form
                 r = scanner.Scan(roots, default, new Progress<HarvestProgress>(p =>
                     BeginInvoke(() => SetStatus($"{p.Phase}… {p.Current}/{p.Total}"))));
             });
-            SetStatus($"Scan complete — +{r.Added} added, {r.Updated} updated, {r.Unchanged} unchanged, {r.Removed} removed, {r.Failed} failed. " +
+            var relinkNote = r.ReLinked > 0 || r.Unmatched > 0
+                ? $" ↺ {r.ReLinked} re-linked" + (r.Unmatched > 0 ? $", {r.Unmatched} ambiguous (kept as new)" : "") + "."
+                : "";
+            SetStatus($"Scan complete — +{r.Added} added, {r.Updated} updated, {r.Unchanged} unchanged, {r.Removed} removed, {r.Failed} failed.{relinkNote} " +
                       $"{_db.ImageCount(includeArchived: false):n0} images.");
             _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
         }
         catch (Exception ex) { SetStatus("Scan failed: " + ex.Message); }
         finally { _busy = false; }
+    }
+
+    /// <summary>T33/F24: rename a physical folder (and re-path every indexed image under it). The disk
+    /// rename runs FIRST (throws on a name collision → DB untouched, no data loss); then RepathFolder
+    /// rewrites the rows' paths in one transaction, preserving ids + all user-state. Guarded by _busy so
+    /// it never races a scan/optimize (both are writers). Runs on the main writer connection like the
+    /// other host-side mutations (fav/note/collection).</summary>
+    private void HandleFolderRename(string? root, string? oldRelDir, string? newName)
+    {
+        if (_busy) { SetStatus("Busy — finish the current operation first."); return; }
+        if (string.IsNullOrEmpty(root) || oldRelDir is null || string.IsNullOrWhiteSpace(newName))
+        { SetStatus("Folder rename: missing target."); return; }
+        var oldRel = oldRelDir.TrimEnd('\\');
+        if (oldRel.Length == 0) { SetStatus("Can't rename a source root here — change it in Settings."); return; }
+        if (newName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || newName is "." or "..")
+        { SetStatus("Invalid folder name."); return; }
+
+        var parent = Path.GetDirectoryName(oldRel) ?? "";          // rel parent ("" = top-level under the root)
+        var newRel = parent.Length == 0 ? newName : Path.Combine(parent, newName);
+        if (string.Equals(oldRel, newRel, StringComparison.Ordinal)) return; // no change
+        var oldAbs = Path.GetFullPath(Path.Combine(root, oldRel));
+        var newAbs = Path.GetFullPath(Path.Combine(root, newRel));
+        try { FileOps.MoveFolder(oldAbs, newAbs); }               // disk first — throws on collision (no DB change)
+        catch (Exception ex) { SetStatus("Folder rename failed: " + ex.Message); return; }
+        try
+        {
+            var n = _db.RepathFolder(root, oldRel, newRel);        // then the index, one tx
+            SetStatus($"Renamed folder to \"{newName}\" — {n:n0} image(s) re-pathed.");
+            _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
+        }
+        catch (Exception ex)
+        {
+            // The disk rename already succeeded but the index update failed — undo the disk move so the
+            // folder + index stay in lockstep. Otherwise the next scan would prune the old rows and re-add
+            // the moved files as blank new rows, detaching their favorite/note/tag/collection state.
+            try { FileOps.MoveFolder(newAbs, oldAbs); SetStatus("Folder rename failed (rolled back): " + ex.Message); }
+            catch (Exception rb) { SetStatus($"Folder rename failed AND rollback failed — run Scan to re-link. ({ex.Message}; {rb.Message})"); }
+        }
+    }
+
+    /// <summary>T34/F23: move the selected images into a folder under <paramref name="root"/> +
+    /// <paramref name="relDir"/> — a physical move (FileOps.Move, collision-suffixed) + RepathRow, so each
+    /// image keeps its id and all user-state. This is an IN-LIBRARY relocate, NOT the export-move that
+    /// prunes. The destination dir is created if missing, so the picker's "＋ New folder…" works in one step.</summary>
+    private async Task HandleMoveToFolder(long[] ids, string? root, string relDir)
+    {
+        if (_busy || ids.Length == 0) return;
+        if (string.IsNullOrEmpty(root)) { SetStatus("Move: no target folder."); return; }
+        var destDir = Path.GetFullPath(Path.Combine(root, relDir ?? ""));
+        if (!IsUnderRoot(root, destDir)) { SetStatus("Move: invalid target folder."); return; }   // dest must stay under the root
+        try { Directory.CreateDirectory(destDir); }
+        catch (Exception ex) { SetStatus("Move failed: " + ex.Message); return; }
+        await RunOp(ids, "Moved", (db, row) =>
+        {
+            if (string.Equals(Path.GetDirectoryName(row.AbsPath), destDir, StringComparison.OrdinalIgnoreCase)) return; // already there
+            var dest = FileOps.UniqueDestination(destDir, row.FileName);
+            FileOps.Move(row.AbsPath, dest);
+            try { db.RepathRow(row.Id, dest, root); }   // keeps id → favorite/notes/tags/collections/optimized/archived survive
+            catch { try { FileOps.Move(dest, row.AbsPath); } catch { } throw; }   // index update failed → undo the move (lockstep); RunOp records it as a failure
+        });
+    }
+
+    /// <summary>T34/F23: rename one image's file in place (keeps its folder). Disk rename FIRST (collision
+    /// → status, DB untouched), then RenameRow (file_name + path columns; id preserved → all user-state
+    /// survives), with a best-effort rollback if the DB update throws.</summary>
+    private void HandleRename(long id, string? newName)
+    {
+        if (_busy) { SetStatus("Busy — finish the current operation first."); return; }
+        var row = _db.GetById(id);
+        if (row is null) { SetStatus("Rename: image not found."); return; }
+        newName = (newName ?? "").Trim();
+        if (newName.Length == 0) { SetStatus("Rename: empty name."); return; }
+        if (Path.GetExtension(newName).Length == 0) newName += row.Ext;   // keep the original extension
+        if (newName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) { SetStatus("Invalid file name."); return; }
+        var dir = Path.GetDirectoryName(row.AbsPath) ?? row.SourceRoot;
+        var newAbs = Path.GetFullPath(Path.Combine(dir, newName));
+        if (string.Equals(newAbs, row.AbsPath, StringComparison.OrdinalIgnoreCase)) return; // no change
+        if (File.Exists(newAbs)) { SetStatus($"A file named \"{newName}\" already exists here."); return; }
+        try { FileOps.Move(row.AbsPath, newAbs); }
+        catch (Exception ex) { SetStatus("Rename failed: " + ex.Message); return; }
+        try
+        {
+            _db.RenameRow(id, newAbs, row.SourceRoot);
+            SetStatus($"Renamed to \"{newName}\".");
+            _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
+        }
+        catch (Exception ex)
+        {
+            try { FileOps.Move(newAbs, row.AbsPath); SetStatus("Rename failed (rolled back): " + ex.Message); }
+            catch (Exception rb) { SetStatus($"Rename failed AND rollback failed — run Scan to re-link. ({ex.Message}; {rb.Message})"); }
+        }
+    }
+
+    /// <summary>T34/F23: create an empty folder under <paramref name="root"/>/<paramref name="parentRel"/>
+    /// (sidebar Folders ＋). The (image-derived) tree only shows folders that hold images, so a brand-new
+    /// empty folder appears once images are moved into it — the Move-to picker's "＋ New folder…" does the
+    /// create + move in one step.</summary>
+    private void HandleNewFolder(string? root, string parentRel, string? name)
+    {
+        if (string.IsNullOrEmpty(root)) { SetStatus("New folder: scan a source folder first."); return; }
+        name = (name ?? "").Trim();
+        if (name.Length == 0) { SetStatus("New folder: empty name."); return; }
+        if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name is "." or "..") { SetStatus("Invalid folder name."); return; }
+        var dir = Path.GetFullPath(Path.Combine(root, parentRel ?? "", name));
+        if (!IsUnderRoot(root, dir)) { SetStatus("Invalid folder location."); return; }   // stay under the root (defends a crafted parent path)
+        try
+        {
+            if (Directory.Exists(dir)) { SetStatus($"A folder named \"{name}\" already exists there."); return; }
+            Directory.CreateDirectory(dir);
+            SetStatus($"Created folder \"{name}\". Move images into it — it appears in the tree once it holds images.");
+        }
+        catch (Exception ex) { SetStatus("New folder failed: " + ex.Message); }
+    }
+
+    /// <summary>True if <paramref name="dir"/> resolves to <paramref name="root"/> itself or a descendant
+    /// — guards the folder paths that cross the JS bridge (move / new-folder targets) against traversal.</summary>
+    private static bool IsUnderRoot(string root, string dir)
+    {
+        var r = Path.GetFullPath(root).TrimEnd('\\', '/') + "\\";
+        var d = Path.GetFullPath(dir).TrimEnd('\\', '/') + "\\";
+        return d.StartsWith(r, StringComparison.OrdinalIgnoreCase);
     }
 
     // ---------------- curation (T13) ----------------
@@ -558,6 +766,64 @@ public sealed class MainForm : Form
         }
         catch (Exception ex) { SetStatus("Auto-tag failed: " + ex.Message); }
         finally { _busy = false; }
+    }
+
+    // ---------------- Library Optimization (T30 / F20) ----------------
+
+    /// <summary>Top-bar "Optimize Library…": preview the whole-library tally, confirm via the dialog
+    /// (originals go to the Recycle Bin), then run the resample→store→recycle job in the background.</summary>
+    private void OpenOptimizeLibrary()
+    {
+        if (_busy) { SetStatus("Busy — finish the current operation first."); return; }
+        var (count, _, bytes) = _db.OptimizePreview("all", _settings.MaxDim, null);
+        if (count == 0) { SetStatus("Nothing to optimize — every image is already optimized or within the size target."); return; }
+        using var dlg = new OptimizeLibraryForm(count, bytes, _settings.MaxDim);
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        _ = HandleOptimizeLibrary("all", null, dlg.MaxDim, ++_optGen);
+    }
+
+    /// <summary>Background optimize job (HandleDupes template): resample each eligible image into the
+    /// managed store, MarkOptimized (keeps the id + all user-state), recycle the original after the
+    /// store copy is verified, regen the thumbnail. Gen-echoed reply + cancellable.</summary>
+    private async Task HandleOptimizeLibrary(string scope, long[]? ids, int maxDim, int gen)
+    {
+        if (_busy) return;
+        if (scope == "selection" && (ids is null || ids.Length == 0)) { SetStatus("No images selected to optimize."); return; }
+        _busy = true;
+        _optCts?.Dispose();
+        _optCts = new CancellationTokenSource();
+        var ct = _optCts.Token;
+        SetStatus("Optimizing library…");
+        var prog = new Progress<HarvestProgress>(p => SetStatus($"{p.Phase}… {p.Current:n0}/{p.Total:n0}"));
+        try
+        {
+            var res = await Task.Run(() =>
+            {
+                using var opDb = new LibraryDb(AppPaths.LibraryDbFile);
+                var eligible = opDb.OptimizeEligibleIds(scope, maxDim, ids);
+                return LibraryOptimizer.Run(opDb, eligible, maxDim, _thumbs, prog, ct);
+            }, ct);
+            _web.CoreWebView2?.PostWebMessageAsString(GalleryBridge.OptDoneReply(gen, res.Optimized, res.Skipped, res.Failed, res.FreedBytes, res.RecycleFailed));
+            _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
+            SetStatus($"Optimized {res.Optimized:n0}, skipped {res.Skipped:n0}" + (res.Failed > 0 ? $", {res.Failed:n0} failed" : "") +
+                      (res.RecycleFailed > 0 ? $", {res.RecycleFailed:n0} original(s) not recycled" : "") +
+                      $". Freed ~{HumanBytes(res.FreedBytes)}. {_db.ImageCount(includeArchived: false):n0} images.");
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus("Optimize cancelled.");
+            _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
+        }
+        catch (Exception ex) { SetStatus("Optimize failed: " + ex.Message); }
+        finally { _busy = false; }
+    }
+
+    private static string HumanBytes(long b)
+    {
+        string[] u = { "B", "KB", "MB", "GB", "TB" };
+        double v = b; int i = 0;
+        while (v >= 1024 && i < u.Length - 1) { v /= 1024; i++; }
+        return $"{v:0.#} {u[i]}";
     }
 
     private bool EnsureExportDir()

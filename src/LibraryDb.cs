@@ -19,8 +19,11 @@ public sealed class LibraryDb : IDisposable
     /// v3 (additive, v2.0) adds images.favorite + tables image_notes, user_tags
     /// (+user_tag_freq +triggers), collections and collection_items for
     /// Favorites / Notes / Manual-Tagging / Collections. All v2.0 user state lives in
-    /// separate tables/columns that UpsertCore never touches, so a rescan can't wipe it.</summary>
-    public const int SchemaVersion = 3;
+    /// separate tables/columns that UpsertCore never touches, so a rescan can't wipe it.
+    /// v4 (additive, v2.1) adds images.optimized + opt_dim + opt_at (managed-store optimization
+    /// state). Like favorite, 'optimized' is post-scan state EXCLUDED from UpsertCore, so a rescan
+    /// of the managed store keeps it. See MarkOptimized + AppPaths.LibraryStoreDir.</summary>
+    public const int SchemaVersion = 4;
 
     private readonly SqliteConnection _con;
 
@@ -53,11 +56,16 @@ CREATE TABLE IF NOT EXISTS images (
   scanned_at TEXT NOT NULL,
   phash INTEGER,
   favorite INTEGER NOT NULL DEFAULT 0,
+  optimized INTEGER NOT NULL DEFAULT 0,
+  opt_dim INTEGER,
+  opt_at TEXT,
   UNIQUE(abs_path)
 );
 CREATE INDEX IF NOT EXISTS ix_images_archived ON images(archived);
--- ix_images_phash + ix_images_favorite are built in Migrate(), NOT here: their columns (phash @ v2,
--- favorite @ v3) may arrive via ALTER on an older DB, and don't exist yet when EnsureSchema runs.
+-- ix_images_phash + ix_images_favorite + ix_images_optimized are built in Migrate(), NOT here:
+-- their columns (phash @ v2, favorite @ v3, optimized @ v4) may arrive via ALTER on an older DB,
+-- and don't exist yet when EnsureSchema runs (BUG-T23-01: building an index over a not-yet-ALTERed
+-- column here throws 'no such column' and crashes the open).
 
 CREATE TABLE IF NOT EXISTS image_tags (
   image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
@@ -167,15 +175,25 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
             // and every existing row reads back as 0.
             if (current < 3 && !ColumnExists("images", "favorite"))
                 Exec("ALTER TABLE images ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;");
+            // v3 → v4: add the managed-store optimization columns. All three move together, so one
+            // ColumnExists guard on 'optimized' is enough. ADD COLUMN with a constant/NULL default is
+            // a metadata-only change in SQLite — instant even on a 100k DB; existing rows read back 0/NULL.
+            if (current < 4 && !ColumnExists("images", "optimized"))
+            {
+                Exec("ALTER TABLE images ADD COLUMN optimized INTEGER NOT NULL DEFAULT 0;");
+                Exec("ALTER TABLE images ADD COLUMN opt_dim INTEGER;");
+                Exec("ALTER TABLE images ADD COLUMN opt_at TEXT;");
+            }
         }
 
-        // Indexes over columns that arrive via ALTER (phash @ v2, favorite @ v3) live HERE, not in
-        // EnsureSchema: EnsureSchema runs FIRST, and on an older DB the column doesn't exist yet, so
-        // a CREATE INDEX … ON images(<col>) there throws 'no such column' and crashes the open. By
-        // this point the column is guaranteed present on every path (fresh: born in EnsureSchema;
-        // upgraded: ALTERed just above). Both are idempotent (IF NOT EXISTS).
+        // Indexes over columns that arrive via ALTER (phash @ v2, favorite @ v3, optimized @ v4) live
+        // HERE, not in EnsureSchema: EnsureSchema runs FIRST, and on an older DB the column doesn't
+        // exist yet, so a CREATE INDEX … ON images(<col>) there throws 'no such column' and crashes
+        // the open. By this point the column is guaranteed present on every path (fresh: born in
+        // EnsureSchema; upgraded: ALTERed just above). All are idempotent (IF NOT EXISTS).
         Exec("CREATE INDEX IF NOT EXISTS ix_images_phash ON images(phash);");
         Exec("CREATE INDEX IF NOT EXISTS ix_images_favorite ON images(favorite);");
+        Exec("CREATE INDEX IF NOT EXISTS ix_images_optimized ON images(optimized);");
 
         if (current is null || current < SchemaVersion)
             SetMeta("schema_version", SchemaVersion.ToString());
@@ -211,11 +229,14 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
 
     private void UpsertCore(ImageRow r)
     {
-        // v3 LOAD-BEARING INVARIANT: 'favorite' and all v2.0 user state (image_notes, user_tags,
-        // collection_items) are deliberately ABSENT from the UPDATE/INSERT column lists below and
-        // from BindImage. A rescan rewrites only scanned facts + image_tags; user intent must
-        // survive untouched (UPDATE leaves favorite as-is; INSERT lets it default to 0). phash IS
-        // bound here — it's recomputed from pixels, not user-entered. Do NOT add favorite here.
+        // v3/v4 LOAD-BEARING INVARIANT: 'favorite' (v3), the v4 optimization columns ('optimized',
+        // 'opt_dim', 'opt_at'), and all v2.0 user state (image_notes, user_tags, collection_items)
+        // are deliberately ABSENT from the UPDATE/INSERT column lists below and from BindImage. A
+        // rescan rewrites only scanned facts + image_tags; post-scan state must survive untouched
+        // (UPDATE leaves them as-is; INSERT lets them default). This is what lets a rescan of the
+        // managed store keep an image's optimized flag (MarkOptimized sets it; the next scan of the
+        // same in-store abs_path is an UPDATE that must NOT clear it). phash IS bound here — it's
+        // recomputed from pixels, not user/post-scan state. Do NOT add favorite/optimized here.
         var existingId = FindIdByAbsPath(r.AbsPath);
         if (existingId is long id)
         {
@@ -357,7 +378,7 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
     /// Search: comma-AND tokens (image_tags join + HAVING COUNT(DISTINCT)=N) plus one
     /// prompt LIKE per quoted phrase, plus the archived filter. Returns a page + total count.
     /// </summary>
-    public (IReadOnlyList<ImageRow> Page, int Total) Query(SearchFilter f, int page, int size, bool includeArchived, bool untaggedOnly = false, bool archivedOnly = false, bool favoritesOnly = false, long? collectionId = null)
+    public (IReadOnlyList<ImageRow> Page, int Total) Query(SearchFilter f, int page, int size, bool includeArchived, bool untaggedOnly = false, bool archivedOnly = false, bool favoritesOnly = false, long? collectionId = null, bool optimizedOnly = false, string? folderPath = null, string? folderRoot = null, bool includeSubfolders = false)
     {
         var where = new List<string>();
         var ps = new List<(string, object)>();
@@ -368,10 +389,32 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
         // v2.0 scope filters — folded into the SAME where list so they apply in BOTH the token and
         // no-token branches AND the COUNT (one fromWhere → page==total, no desync).
         if (favoritesOnly) where.Add("i.favorite=1");                                  // Favorites view (T24)
+        if (optimizedOnly) where.Add("i.optimized=1");                                 // Optimized view (T31)
         if (collectionId is long cid)                                                  // Collection view (T28)
         {
             where.Add("i.id IN (SELECT image_id FROM collection_items WHERE collection_id=$cid)");
             ps.Add(("$cid", cid));
+        }
+        // Folder view (T33/F24): scoped to a (folderRoot, folderPath) node so identical rel-dirs in
+        // different roots — the managed store is always a second root — don't merge. folderPath is a
+        // rel-DIR ("" = files directly under the root); includeSubfolders widens to the whole subtree.
+        // substr/instr (NOT LIKE) so a folder name containing %/_ can't act as a wildcard. Folds into
+        // the shared where list → page==total preserved.
+        if (folderRoot is { Length: > 0 }) { where.Add("i.source_root=$froot"); ps.Add(("$froot", folderRoot)); }
+        if (folderPath is not null)
+        {
+            if (folderPath.Length == 0)
+            {
+                if (!includeSubfolders) where.Add("instr(i.rel_path,'\\')=0"); // files directly under the root only
+                // includeSubfolders at root level → no rel_path constraint (the whole root)
+            }
+            else
+            {
+                var pfx = folderPath.TrimEnd('\\') + "\\";
+                ps.Add(("$fpfx", pfx));
+                where.Add("substr(i.rel_path,1,length($fpfx))=$fpfx");                        // under this folder
+                if (!includeSubfolders) where.Add("instr(substr(i.rel_path,length($fpfx)+1),'\\')=0"); // direct children only
+            }
         }
         for (int k = 0; k < f.Phrases.Count; k++)
         {
@@ -426,6 +469,273 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
     public void UpdateFileSig(long id, long sizeBytes, long mtimeTicks, int width, int height) =>
         Exec("UPDATE images SET size_bytes=$s, mtime_ticks=$m, width=$w, height=$h WHERE id=$id;",
             ("$s", sizeBytes), ("$m", mtimeTicks), ("$w", width), ("$h", height), ("$id", id));
+
+    // ---------------- v4 managed-store optimization (v2.1) ----------------
+
+    /// <summary>Record that an image has been resampled into the Tag Hag-managed store (T30): repoint
+    /// its path columns to the new in-store location and set optimized/opt_dim/opt_at. This is the SAME
+    /// row id — a MOVE, not a new row — so every v3 user-state FK (favorite, notes, user_tags,
+    /// collection_items) follows the image automatically. source_root/rel_path are recomputed RELATIVE
+    /// to the managed store root so the next scan of the store reads this exact file as 'unchanged'
+    /// rather than inserting a fresh row (the no-double-row invariant, R16). 'optimized' is set HERE on
+    /// purpose: it is excluded from UpsertCore, so a later rescan never clears it.</summary>
+    public void MarkOptimized(long id, string newAbsPath, int maxDim, string at)
+    {
+        var store = AppPaths.LibraryStoreDir;
+        var abs = Path.GetFullPath(newAbsPath);
+        var rel = Path.GetRelativePath(store, abs);
+        Exec(@"UPDATE images SET abs_path=$abs, source_root=$src, rel_path=$rel,
+                optimized=1, opt_dim=$dim, opt_at=$at WHERE id=$id;",
+            ("$abs", abs), ("$src", store), ("$rel", rel),
+            ("$dim", maxDim), ("$at", at), ("$id", id));
+    }
+
+    // ===================== Path re-link / repath (T32 + T33) =====================
+    // Shared contract (coordination note c): a row is MOVED by rewriting ONLY its path columns
+    // (abs_path/source_root/rel_path) WHERE id — the id is preserved, so every id-keyed FK
+    // (image_tags, user_tags, image_notes, collection_items) and every post-scan column (favorite,
+    // optimized, archived) survives untouched. rel_path is always recomputed from the new root via
+    // Path.GetRelativePath (the same rule as MarkOptimized). RepathRow = one row (re-link);
+    // RepathFolder = a folder subtree (rename); neither ever touches user/post-scan state.
+
+    /// <summary>Move a single row to a new path, preserving its id + all user/post-scan state
+    /// (T32/F22 re-link). rel_path is recomputed relative to <paramref name="sourceRoot"/>.</summary>
+    public void RepathRow(long id, string newAbsPath, string sourceRoot)
+    {
+        var abs = Path.GetFullPath(newAbsPath);
+        var rel = Path.GetRelativePath(sourceRoot, abs);
+        Exec(@"UPDATE images SET abs_path=$abs, source_root=$src, rel_path=$rel WHERE id=$id;",
+            ("$abs", abs), ("$src", sourceRoot), ("$rel", rel), ("$id", id));
+    }
+
+    /// <summary>Rename a single image in the index (T34/F23): like <see cref="RepathRow"/> but also
+    /// rewrites file_name (the only extra column a rename touches vs a move). id preserved → all
+    /// user/post-scan state survives. The physical file rename is done by the caller first.</summary>
+    public void RenameRow(long id, string newAbsPath, string sourceRoot)
+    {
+        var abs = Path.GetFullPath(newAbsPath);
+        var rel = Path.GetRelativePath(sourceRoot, abs);
+        Exec(@"UPDATE images SET abs_path=$abs, source_root=$src, rel_path=$rel, file_name=$fn WHERE id=$id;",
+            ("$abs", abs), ("$src", sourceRoot), ("$rel", rel), ("$fn", Path.GetFileName(abs)), ("$id", id));
+    }
+
+    /// <summary>A row whose indexed file is gone AND that carries a perceptual hash — a candidate
+    /// for re-linking against a freshly-seen orphan file (T32/F22).</summary>
+    public readonly record struct DisappearedRow(long Id, long Phash, long Size);
+
+    /// <summary>Rows under the scanned roots whose abs_path was NOT seen this pass, no longer exist
+    /// on disk, and HAVE a phash — files that vanished from their indexed location and can be matched
+    /// by content. (Rows with no phash can't be matched — a vanished file can't be re-hashed — so they
+    /// fall through to the normal prune exactly as before: no regression. Archived rows ARE included
+    /// so a moved Bog file keeps its archived flag via the surviving id.)</summary>
+    public IReadOnlyList<DisappearedRow> DisappearedCandidates(IReadOnlyList<string> roots, ISet<string> seenAbs)
+    {
+        var list = new List<DisappearedRow>();
+        using var cmd = _con.CreateCommand();
+        cmd.CommandText = "SELECT id, abs_path, source_root, phash, size_bytes FROM images WHERE phash IS NOT NULL;";
+        using var rd = cmd.ExecuteReader();
+        while (rd.Read())
+        {
+            var id = rd.GetInt64(0); var abs = rd.GetString(1); var root = rd.GetString(2);
+            if (!roots.Any(r => string.Equals(r, root, StringComparison.OrdinalIgnoreCase))) continue;
+            if (seenAbs.Contains(abs)) continue;   // still where we indexed it — not disappeared
+            if (File.Exists(abs)) continue;        // still on disk somehow — leave it
+            list.Add(new DisappearedRow(id, rd.GetInt64(3), rd.GetInt64(4)));
+        }
+        return list;
+    }
+
+    /// <summary>Apply re-link decisions in one transaction (T32/F22): for each (old row → orphan)
+    /// pair, delete the freshly-inserted orphan row (freeing its abs_path) then repath the original
+    /// row onto it (keeps id + user-state); afterwards persist the computed phash for any orphan we
+    /// hashed but did NOT consume (backfill-on-demand for orphans, per F22). Returns the re-link
+    /// count. Order is delete-then-repath so the UNIQUE abs_path is never violated.</summary>
+    public int ApplyRelinks(IReadOnlyList<(long OldId, string NewAbs, string NewRoot, long OrphanId)> relinks,
+                            IReadOnlyDictionary<long, long> orphanHashes)
+    {
+        var consumed = new HashSet<long>();
+        using var tx = _con.BeginTransaction();
+        foreach (var (oldId, newAbs, newRoot, orphanId) in relinks)
+        {
+            Remove(orphanId);                  // drop the duplicate new row (cascade-clears its empty FKs)
+            RepathRow(oldId, newAbs, newRoot); // original row inherits the new location
+            consumed.Add(orphanId);
+        }
+        foreach (var (id, hash) in orphanHashes)
+            if (!consumed.Contains(id)) UpdatePhash(id, hash);
+        tx.Commit();
+        return relinks.Count;
+    }
+
+    /// <summary>Rename/move a folder subtree in the index (T33/F24): every row under
+    /// <paramref name="oldRelDir"/> (within <paramref name="sourceRoot"/>) is repathed to the same
+    /// position under <paramref name="newRelDir"/>, in ONE transaction. The physical move is done by
+    /// FileOps.MoveFolder first; this keeps the DB in lock-step (ids + user-state preserved). Returns
+    /// the number of rows moved. source_root is unchanged (a rename stays within its root).</summary>
+    public int RepathFolder(string sourceRoot, string oldRelDir, string newRelDir)
+    {
+        oldRelDir = oldRelDir.TrimEnd('\\');
+        newRelDir = newRelDir.TrimEnd('\\');
+        var oldSep = oldRelDir + "\\";
+        var toMove = new List<(long Id, string Rel)>();
+        using (var cmd = _con.CreateCommand())
+        {
+            // substr-prefix (NOT LIKE — a folder name may contain %/_), scoped to the one root.
+            cmd.CommandText = "SELECT id, rel_path FROM images WHERE source_root=$r AND substr(rel_path,1,length($p))=$p;";
+            cmd.Parameters.AddWithValue("$r", sourceRoot);
+            cmd.Parameters.AddWithValue("$p", oldSep);
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read()) toMove.Add((rd.GetInt64(0), rd.GetString(1)));
+        }
+        if (toMove.Count == 0) return 0;
+        using var tx = _con.BeginTransaction();
+        foreach (var (id, rel) in toMove)
+        {
+            var newRel = newRelDir + rel.Substring(oldRelDir.Length); // rel begins with oldRelDir + "\..."
+            var newAbs = Path.GetFullPath(Path.Combine(sourceRoot, newRel));
+            Exec("UPDATE images SET abs_path=$a, rel_path=$rl WHERE id=$id;", ("$a", newAbs), ("$rl", newRel), ("$id", id));
+        }
+        tx.Commit();
+        return toMove.Count;
+    }
+
+    /// <summary>The derived folder tree (T33/F24): one top node per source_root, nested rel-dirs
+    /// beneath, each node carrying a recursive (subtree) non-archived image count. No folders table —
+    /// built from the distinct (source_root, rel-dir) of the indexed images. O(images) to read; the
+    /// tree itself is O(distinct folders) (R17 — fine at v2.1 scale; cache later if needed).</summary>
+    public IReadOnlyList<FolderNode> FolderTree()
+    {
+        // 1) direct file counts per (root, rel-dir).
+        var direct = new Dictionary<(string Root, string Dir), int>();
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.CommandText = "SELECT source_root, rel_path FROM images WHERE archived=0;";
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read())
+            {
+                var root = rd.GetString(0); var rel = rd.GetString(1);
+                var slash = rel.LastIndexOf('\\');
+                var dir = slash < 0 ? "" : rel.Substring(0, slash);
+                var key = (root, dir);
+                direct[key] = direct.TryGetValue(key, out var c) ? c + 1 : 1;
+            }
+        }
+
+        // 2) build a node per root, splitting each rel-dir into segments (intermediate dirs created
+        //    on the way even if they hold no files directly).
+        var roots = new Dictionary<string, FolderNode>(StringComparer.OrdinalIgnoreCase);
+        FolderNode RootNode(string root)
+        {
+            if (!roots.TryGetValue(root, out var n))
+            {
+                var leaf = Path.GetFileName(root.TrimEnd('\\', '/'));
+                roots[root] = n = new FolderNode { Root = root, Path = "", Name = string.IsNullOrEmpty(leaf) ? root : leaf };
+            }
+            return n;
+        }
+        foreach (var ((root, dir), cnt) in direct)
+        {
+            var node = RootNode(root);
+            if (dir.Length == 0) { node.Count += cnt; continue; } // files directly under the root
+            var segs = dir.Split('\\', StringSplitOptions.RemoveEmptyEntries);
+            var cur = node; var built = "";
+            foreach (var seg in segs)
+            {
+                built = built.Length == 0 ? seg : built + "\\" + seg;
+                var child = cur.Children.FirstOrDefault(c => string.Equals(c.Name, seg, StringComparison.OrdinalIgnoreCase));
+                if (child is null) { child = new FolderNode { Root = root, Path = built, Name = seg }; cur.Children.Add(child); }
+                cur = child;
+            }
+            cur.Count += cnt; // direct count lands on the leaf segment node
+        }
+
+        // 3) roll counts up so each node totals its whole subtree, and sort children by name.
+        int RollUp(FolderNode n)
+        {
+            int total = n.Count;
+            n.Children.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+            foreach (var c in n.Children) total += RollUp(c);
+            n.Count = total;
+            return total;
+        }
+        var ordered = roots.Values.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        foreach (var r in ordered) RollUp(r);
+        return ordered;
+    }
+
+    /// <summary>Persist the managed-store root in meta(library_store_root) so the app + future
+    /// migrations know which scanned root Tag Hag owns. Idempotent (called once per scan).</summary>
+    public void SetLibraryStoreRoot(string path) => SetMeta("library_store_root", path);
+
+    /// <summary>The recorded managed-store root, or null if never set.</summary>
+    public string? GetLibraryStoreRoot() => Scalar("SELECT v FROM meta WHERE k='library_store_root';") as string;
+
+    // ---------------- v4 Library Optimization scope/preview (T30 / F20) ----------------
+
+    /// <summary>Build the WHERE fragment + bound params for an optimize scope and append them to
+    /// <paramref name="ps"/>. Scopes: "all" (the whole library), "selection" (the explicit
+    /// <paramref name="ids"/>), or "folder:&lt;rel-path-prefix&gt;" (an exact dir or any descendant).
+    /// Returns "0" (matches nothing) for an empty selection. The fragment is combined by callers with
+    /// the archived/optimized predicates so a single shared clause drives both preview and the id set.</summary>
+    private static string ScopeClause(string? scope, IReadOnlyList<long>? ids, List<(string, object)> ps)
+    {
+        scope ??= "all";
+        if (scope == "selection")
+        {
+            if (ids is null || ids.Count == 0) return "0";
+            var names = new List<string>();
+            for (int i = 0; i < ids.Count; i++) { names.Add($"$os{i}"); ps.Add(($"$os{i}", ids[i])); }
+            return $"id IN ({string.Join(",", names)})";
+        }
+        if (scope.StartsWith("folder:", StringComparison.Ordinal))
+        {
+            var prefix = scope["folder:".Length..];
+            // rel_path is stored with the OS separator the scanner produced (Windows '\'). Match the
+            // exact folder OR any descendant via an exact-prefix substr comparison (NOT LIKE — that
+            // would treat %/_ in a folder name as wildcards and over-match, BUG flagged in review).
+            ps.Add(("$ofp", prefix));
+            ps.Add(("$ofd", prefix + "\\"));
+            return "(rel_path = $ofp OR substr(rel_path, 1, length($ofd)) = $ofd)";
+        }
+        return "1"; // all
+    }
+
+    /// <summary>Ids eligible to optimize within a scope at the given <paramref name="maxDim"/>: not
+    /// archived, not already optimized, and NOT already within the size target (using the stored
+    /// width/height — rows with unknown dims are included and the runtime re-checks). Oldest-first.
+    /// Excluding already-within-budget rows here (rather than only at runtime) keeps the preview honest
+    /// and lets a later re-run at a SMALLER maxDim pick up images that were within the old budget.</summary>
+    public IReadOnlyList<long> OptimizeEligibleIds(string? scope, int maxDim, IReadOnlyList<long>? ids)
+    {
+        var ps = new List<(string, object)>();
+        var clause = ScopeClause(scope, ids, ps);
+        ps.Add(("$omd", maxDim));
+        var list = new List<long>();
+        using var cmd = _con.CreateCommand();
+        cmd.CommandText = $"SELECT id FROM images WHERE ({clause}) AND archived=0 AND optimized=0 " +
+                          "AND (width IS NULL OR height IS NULL OR width > $omd OR height > $omd) ORDER BY id;";
+        foreach (var (n, v) in ps) cmd.Parameters.AddWithValue(n, v);
+        using var rd = cmd.ExecuteReader();
+        while (rd.Read()) list.Add(rd.GetInt64(0));
+        return list;
+    }
+
+    /// <summary>Cheap preview tally for a scope at <paramref name="maxDim"/> (no disk reads):
+    /// Count = images that WILL be optimized (eligible), Skip = the rest in scope (already optimized OR
+    /// already within budget), Bytes = SUM(size_bytes) of the eligible set. Bytes is an ESTIMATE of the
+    /// current footprint of those images — the post-resample saving is only known once the job runs.</summary>
+    public (int Count, int Skip, long Bytes) OptimizePreview(string? scope, int maxDim, IReadOnlyList<long>? ids)
+    {
+        var ps = new List<(string, object)>();
+        var clause = ScopeClause(scope, ids, ps);
+        ps.Add(("$omd", maxDim));
+        var arr = ps.ToArray();
+        var elig = $"({clause}) AND archived=0 AND optimized=0 AND (width IS NULL OR height IS NULL OR width > $omd OR height > $omd)";
+        int count = Convert.ToInt32(Scalar($"SELECT COUNT(*) FROM images WHERE {elig};", arr) ?? 0);
+        int inScope = Convert.ToInt32(Scalar($"SELECT COUNT(*) FROM images WHERE ({clause}) AND archived=0;", arr) ?? 0);
+        long bytes = Convert.ToInt64(Scalar($"SELECT COALESCE(SUM(size_bytes),0) FROM images WHERE {elig};", arr) ?? 0L);
+        return (count, inScope - count, bytes);
+    }
 
     /// <summary>Full row by id (lightbox / inspector).</summary>
     public ImageRow? GetById(long id)
@@ -498,7 +808,10 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
             Archived = Convert.ToInt64(G("archived") ?? 0L) != 0,
             ScannedAt = (string)(G("scanned_at") ?? ""),
             Phash = G("phash") is { } ph ? Convert.ToInt64(ph) : null,
-            Favorite = Convert.ToInt64(G("favorite") ?? 0L) != 0
+            Favorite = Convert.ToInt64(G("favorite") ?? 0L) != 0,
+            Optimized = Convert.ToInt64(G("optimized") ?? 0L) != 0,
+            OptDim = G("opt_dim") is { } od ? Convert.ToInt32(od) : null,
+            OptAt = (string?)G("opt_at")
         };
     }
 
@@ -523,9 +836,22 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
     public void SetFavorite(long id, bool on) =>
         Exec("UPDATE images SET favorite=$f WHERE id=$id;", ("$f", on ? 1 : 0), ("$id", id));
 
+    /// <summary>Bulk set/clear the favorite flag over a selection in one transaction (T34/F23
+    /// action-bar ★). Same per-row UPDATE as <see cref="SetFavorite"/>; survives rescan.</summary>
+    public void SetFavoriteBulk(IEnumerable<long> ids, bool on)
+    {
+        using var tx = _con.BeginTransaction();
+        foreach (var id in ids) Exec("UPDATE images SET favorite=$f WHERE id=$id;", ("$f", on ? 1 : 0), ("$id", id));
+        tx.Commit();
+    }
+
     /// <summary>Non-archived favorited images (sidebar Favorites count).</summary>
     public long FavoriteCount() =>
         Convert.ToInt64(Scalar("SELECT COUNT(*) FROM images WHERE favorite=1 AND archived=0;") ?? 0L);
+
+    /// <summary>Non-archived optimized images (sidebar Optimized count, T31).</summary>
+    public long OptimizedCount() =>
+        Convert.ToInt64(Scalar("SELECT COUNT(*) FROM images WHERE optimized=1 AND archived=0;") ?? 0L);
 
     /// <summary>Upsert the per-image note (empty body clears it to ''); stamps updated_at (local ISO).</summary>
     public void SetNote(long id, string body) =>
