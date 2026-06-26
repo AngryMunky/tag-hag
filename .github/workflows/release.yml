@@ -59,22 +59,13 @@ jobs:
             throw "Version mismatch: the exe is $fv but the tag is v$want. Bump <Version> in TheTagHag.csproj to match the tag before releasing."
           }
 
-      - name: Name the release asset
-        id: asset
-        shell: pwsh
-        run: |
-          $name = "TheTagHag-${{ steps.ver.outputs.tag }}-win-x64.exe"
-          Copy-Item 'publish/TheTagHag.exe' "publish/$name" -Force
-          "path=publish/$name" >> $env:GITHUB_OUTPUT
-          "name=$name"         >> $env:GITHUB_OUTPUT
-
       - name: Create or update the GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag   = '${{ steps.ver.outputs.tag }}'
-          $asset = '${{ steps.asset.outputs.path }}'
+          $asset = 'publish/TheTagHag.exe'
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
             Write-Host "Release $tag already exists - uploading asset (clobber)."
@@ -88,5 +79,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: TheTagHag-${{ steps.ver.outputs.tag }}-win-x64
-          path: ${{ steps.asset.outputs.path }}
+          path: publish/TheTagHag.exe
           if-no-files-found: error

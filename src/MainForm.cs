@@ -56,7 +56,7 @@ public sealed class MainForm : Form
         _tb.Items.Add(new ToolStripSeparator());
         _tb.Items.Add(Btn("Civitai", OpenCivitai));
         _tb.Items.Add(Btn("Settings", async () => await OpenSettings()));
-        _tb.Items.Add(Btn("About", () => MessageBox.Show($"{AppInfo.Name} v{AppInfo.Version}\n{AppInfo.Tagline}", AppInfo.Name)));
+        _tb.Items.Add(Btn("About", ShowAbout));
     }
 
     private static ToolStripButton Btn(string text, Action onClick)
@@ -64,6 +64,71 @@ public sealed class MainForm : Form
         var b = new ToolStripButton(text) { DisplayStyle = ToolStripItemDisplayStyle.Text };
         b.Click += (_, _) => onClick();
         return b;
+    }
+
+    /// <summary>About dialog: name / version / tagline + a clickable link to the public repo.</summary>
+    private void ShowAbout()
+    {
+        using var dlg = new Form
+        {
+            Text = $"About {AppInfo.Name}",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowInTaskbar = false,
+            ClientSize = new Size(400, 180),
+            BackColor = Color.FromArgb(0x14, 0x10, 0x18),
+            ForeColor = Color.FromArgb(0xD8, 0xD0, 0xBF),
+        };
+        AppIcon.Apply(dlg);
+
+        var title = new Label
+        {
+            Text = AppInfo.Name,
+            AutoSize = true,
+            Location = new Point(20, 18),
+            ForeColor = Color.FromArgb(0xA4, 0xFF, 0x6A),
+            Font = new Font(dlg.Font.FontFamily, 15f, FontStyle.Bold),
+        };
+        var ver = new Label
+        {
+            Text = $"v{AppInfo.Version}",
+            AutoSize = true,
+            Location = new Point(22, 52),
+            ForeColor = Color.FromArgb(0x9A, 0x90, 0x86),
+        };
+        var tag = new Label { Text = AppInfo.Tagline, AutoSize = true, Location = new Point(22, 78) };
+        var link = new LinkLabel
+        {
+            Text = AppInfo.RepoUrl,
+            AutoSize = true,
+            Location = new Point(22, 108),
+            LinkColor = Color.FromArgb(0xA4, 0xFF, 0x6A),
+            ActiveLinkColor = Color.FromArgb(0xC7, 0xA2, 0x52),
+            VisitedLinkColor = Color.FromArgb(0xA4, 0xFF, 0x6A),
+            LinkBehavior = LinkBehavior.HoverUnderline,
+        };
+        link.LinkClicked += (_, _) =>
+        {
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(AppInfo.RepoUrl) { UseShellExecute = true }); }
+            catch { /* ignore launch failures */ }
+        };
+        var ok = new Button
+        {
+            Text = "OK",
+            DialogResult = DialogResult.OK,
+            Size = new Size(80, 26),
+            Location = new Point(dlg.ClientSize.Width - 100, dlg.ClientSize.Height - 40),
+            FlatStyle = FlatStyle.Flat,
+            ForeColor = Color.FromArgb(0xD8, 0xD0, 0xBF),
+            BackColor = Color.FromArgb(0x2B, 0x2A, 0x33),
+        };
+        ok.FlatAppearance.BorderColor = Color.FromArgb(0x5B, 0x3B, 0x8C);
+
+        dlg.Controls.AddRange(new Control[] { title, ver, tag, link, ok });
+        dlg.AcceptButton = ok;
+        dlg.ShowDialog(this);
     }
 
     private async Task InitAsync()

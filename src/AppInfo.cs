@@ -13,6 +13,9 @@ public static class AppInfo
     public const string Name = "The Tag Hag";
     public const string Tagline = "Tame the AI image hoard.";
 
+    /// <summary>The Tag Hag's public home (the trimmed mirror) — shown in the About dialog.</summary>
+    public const string RepoUrl = "https://github.com/AngryMunky/tag-hag";
+
     /// <summary>Civitai harvest mode is forked from the local CivitaiHarvesterApp (O3); this
     /// repo URL is the upstream reference for that engine only.</summary>
     public const string CivitaiRepoUrl = "https://github.com/AngryMunky/CivitaiHarvester";
