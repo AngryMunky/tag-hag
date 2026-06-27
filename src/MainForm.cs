@@ -25,6 +25,7 @@ public sealed class MainForm : Form
     private bool _busy;
     private int _optGen;                          // T30: generation token for the optimize job (drop stale replies)
     private CancellationTokenSource? _optCts;     // T30: cancels the running optimize job
+    private CancellationTokenSource? _scanCts;    // T36/F26: cancels the running scan/import
 
     public MainForm()
     {
@@ -294,6 +295,7 @@ public sealed class MainForm : Form
                 return;
             }
             if (type == "optimizecancel") { _optCts?.Cancel(); return; }
+            if (type == "scancancel") { _scanCts?.Cancel(); return; }   // T36/F26: cancel the running scan
             // T33 / F24 folder rename: physically rename the folder, then repath every indexed row
             // under it in one tx (ids + user-state preserved). Disk move runs first, so a collision/
             // error leaves the DB untouched (no data loss). Silent (pushes {type:'reload'}).
@@ -484,24 +486,46 @@ public sealed class MainForm : Form
         var storeRoot = AppPaths.EnsureLibraryStore();
         if (!roots.Contains(storeRoot, StringComparer.OrdinalIgnoreCase)) roots.Add(storeRoot);
         _db.SetLibraryStoreRoot(storeRoot);
+        _scanCts?.Dispose();
+        _scanCts = new CancellationTokenSource();
+        var ct = _scanCts.Token;
+        int lastRead = 0, lastTotal = 0;   // last determinate tick, for an honest "canceled at n/N"
         ScanResult r = default;
+        // F26/T36: push real 0–100% progress to the centered overlay (Total==0 ⇒ indeterminate) AND keep
+        // the compact status-bar echo. Progress<T> built on the UI thread marshals back to it.
+        var prog = new Progress<HarvestProgress>(p =>
+        {
+            if (p.Total > 0) { lastRead = p.Current; lastTotal = p.Total; }
+            _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "progress", phase = p.Phase, current = p.Current, total = p.Total }));
+            SetStatus($"{p.Phase}… {p.Current:n0}" + (p.Total > 0 ? $"/{p.Total:n0}" : ""));
+        });
         try
         {
             await Task.Run(() =>
             {
                 using var scanDb = new LibraryDb(AppPaths.LibraryDbFile); // own writer connection (WAL)
                 var scanner = new LocalScanner(scanDb);
-                r = scanner.Scan(roots, default, new Progress<HarvestProgress>(p =>
-                    BeginInvoke(() => SetStatus($"{p.Phase}… {p.Current}/{p.Total}"))));
-            });
+                r = scanner.Scan(roots, ct, prog);
+            }, ct);
             var relinkNote = r.ReLinked > 0 || r.Unmatched > 0
                 ? $" ↺ {r.ReLinked} re-linked" + (r.Unmatched > 0 ? $", {r.Unmatched} ambiguous (kept as new)" : "") + "."
                 : "";
             SetStatus($"Scan complete — +{r.Added} added, {r.Updated} updated, {r.Unchanged} unchanged, {r.Removed} removed, {r.Failed} failed.{relinkNote} " +
                       $"{_db.ImageCount(includeArchived: false):n0} images.");
+            _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "scandone", added = r.Added, updated = r.Updated, removed = r.Removed, failed = r.Failed, reLinked = r.ReLinked, unmatched = r.Unmatched, canceled = false }));
             _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
         }
-        catch (Exception ex) { SetStatus("Scan failed: " + ex.Message); }
+        catch (OperationCanceledException)
+        {
+            // The upsert is one atomic batch AFTER all reads, so a cancel leaves the library unchanged.
+            SetStatus($"Scan canceled — stopped at {lastRead:n0}/{lastTotal:n0}; library unchanged.");
+            _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "scandone", canceled = true, read = lastRead, total = lastTotal }));
+        }
+        catch (Exception ex)
+        {
+            SetStatus("Scan failed: " + ex.Message);
+            _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "scandone", canceled = true, read = lastRead, total = lastTotal, error = true }));
+        }
         finally { _busy = false; }
     }
 

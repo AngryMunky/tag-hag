@@ -30,7 +30,9 @@ public sealed class LocalScanner
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var toParse = new List<(string Root, string Path, FileInfo Fi, bool Existed)>();
 
-        // 1) Enumerate + incremental skip.
+        // 1) Enumerate + incremental skip. (F26/T36: "Scanning folders…" is indeterminate — the total is
+        // unknown until enumeration finishes, so report Total=0 with a running discovered count.)
+        progress?.Report(new HarvestProgress("Scanning folders", 0, 0));
         foreach (var root in roots)
         {
             foreach (var path in SafeEnumerate(root))
@@ -39,6 +41,7 @@ public sealed class LocalScanner
                 if (!Exts.Contains(Path.GetExtension(path))) continue;
                 var abs = Path.GetFullPath(path);
                 seen.Add(abs);
+                if (seen.Count % 200 == 0) progress?.Report(new HarvestProgress("Scanning folders", seen.Count, 0));
                 try
                 {
                     var fi = new FileInfo(path);
@@ -50,19 +53,23 @@ public sealed class LocalScanner
             }
         }
 
+        // 2) Parallel metadata reads → ImageRows. (F26/T36: determinate — report per-file via the
+        // Interlocked+modulo idiom so the overlay bar advances; throttled to every 100 + the final tick.)
         progress?.Report(new HarvestProgress("Reading metadata", 0, toParse.Count));
-
-        // 2) Parallel metadata reads → ImageRows.
         var parsed = new ConcurrentBag<(ImageRow Row, bool Existed)>();
         var failedReads = 0;
+        var readDone = 0;
         var opts = new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 1) };
         Parallel.ForEach(toParse, opts, item =>
         {
             try { parsed.Add((BuildRow(item.Root, item.Path, item.Fi), item.Existed)); }
             catch { Interlocked.Increment(ref failedReads); }
+            var n = Interlocked.Increment(ref readDone);
+            if (n % 100 == 0 || n == toParse.Count) progress?.Report(new HarvestProgress("Reading metadata", n, toParse.Count));
         });
 
         // 3) Single-writer batched upsert.
+        progress?.Report(new HarvestProgress("Indexing", 0, 0));   // F26/T36: finalize phase (indeterminate)
         var rows = parsed.Select(x => x.Row).ToList();
         _db.UpsertBatch(rows);
         int added = parsed.Count(x => !x.Existed);
@@ -81,6 +88,7 @@ public sealed class LocalScanner
         if (disappeared.Count > 0)
         {
             ct.ThrowIfCancellationRequested();
+            progress?.Report(new HarvestProgress("Re-linking moved files", 0, 0));   // F26/T36 (indeterminate)
             var orphans = parsed.Where(x => !x.Existed).Select(x => x.Row).ToList(); // new rows (ids set by upsert)
             var orphanHash = new ConcurrentDictionary<long, long>();
             Parallel.ForEach(orphans, opts, o => { var h = PerceptualHash.Compute(o.AbsPath); if (h is long hv) orphanHash[o.Id] = hv; });

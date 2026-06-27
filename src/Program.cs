@@ -76,6 +76,10 @@ internal static class Program
             return FoldersSelfTest();
         if (args.Any(a => string.Equals(a, "--selftest-filemanager", StringComparison.OrdinalIgnoreCase)))
             return FileManagerSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-selectall", StringComparison.OrdinalIgnoreCase)))
+            return SelectAllSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-scanprogress", StringComparison.OrdinalIgnoreCase)))
+            return ScanProgressSelfTest();
 
         if (args.Any(a => string.Equals(a, "--selftest-favorites", StringComparison.OrdinalIgnoreCase)))
             return FavoritesSelfTest();
@@ -548,10 +552,44 @@ internal static class Program
             Check("embedded gallery template found", resName is not null);
             Check("template has the search input + bridge", html.Contains("id=\"search\"") && html.Contains("chrome.webview"));
 
-            // Scan fixtures, then drive the bridge like the WebView2 host would.
+            // Seed a KNOWN, deterministic fixture set, then drive the bridge like the WebView2 host
+            // would. We do NOT scan fixturesRoot any more: whatever real images happened to sit there
+            // (or a stale selftest-ui.db left in the build output) made the old row-count assertions
+            // drift. Like the other FreshDb suites (--selftest-folders/--selftest-filemanager) the DB
+            // is wiped first; each fixture is a real on-disk PNG (so the thumbnail check below can
+            // decode one) carrying an explicit prompt, with tags derived exactly as the scanner does
+            // (PromptSimilarity.TokenSet) so search + autocomplete match what's seeded.
             var dbPath = FreshDb("selftest-ui.db");
             using var db = new LibraryDb(dbPath);
-            new LocalScanner(db).Scan(new[] { Path.GetFullPath(fixturesRoot) });
+            var fixturesDir = Path.Combine(AppPaths.ExeDir, "selftest-ui-fixtures");
+            if (Directory.Exists(fixturesDir)) Directory.Delete(fixturesDir, true);
+            // (relPath, prompt): 8 images total; 5 carry the "1girl" token; 2 carry "solo" (the
+            // autocomplete probe). Counts asserted below are read straight off this table.
+            var fixtures = new[]
+            {
+                ("a\\01.png", "1girl, solo, blue eyes, masterpiece"),
+                ("a\\02.png", "1girl, long hair, outdoors"),
+                ("a\\03.png", "1girl, smile, detailed"),
+                ("b\\04.png", "1boy, armor, sword"),
+                ("b\\05.png", "landscape, mountains, sunset"),
+                ("b\\06.png", "1girl, 1boy, dancing"),
+                ("c\\07.png", "cat, sitting, windowsill"),
+                ("c\\08.png", "1girl, red dress, solo"),
+            };
+            int pngSeed = 50;
+            foreach (var (rel, prompt) in fixtures)
+            {
+                var abs = Path.Combine(fixturesDir, rel);
+                Directory.CreateDirectory(Path.GetDirectoryName(abs)!);
+                MakeRandomPng(abs, pngSeed++);
+                db.Upsert(new ImageRow
+                {
+                    SourceRoot = fixturesDir, RelPath = rel, AbsPath = abs, FileName = Path.GetFileName(abs),
+                    Ext = ".png", SizeBytes = new FileInfo(abs).Length, MtimeTicks = 1,
+                    MetaFormat = "a1111", MetaSource = "embedded", Prompt = prompt, Negative = "",
+                    ScannedAt = "t", Tags = PromptSimilarity.TokenSet(prompt).ToList()
+                });
+            }
             var bridge = new GalleryBridge(db, r => $"https://full.local/{r.Id}");
 
             string? pageAll = bridge.Handle("{\"type\":\"query\",\"raw\":\"\",\"page\":0,\"size\":60}");
@@ -570,7 +608,7 @@ internal static class Program
             var acTokens = dAc.RootElement.GetProperty("items").EnumerateArray().Select(x => x.GetProperty("token").GetString()).ToList();
 
             Check("page reply type=page", dAll.RootElement.GetProperty("type").GetString() == "page");
-            Check("page total = 13", totalAll == 13);
+            Check("page total = 8 (seeded fixtures)", totalAll == 8);
             Check("page items populated", itemCount > 0);
             Check("item url is id-based (full.local)", firstUrl.StartsWith("https://full.local/"));
             Check("item carries format + prompt", dAll.RootElement.GetProperty("items")[0].TryGetProperty("format", out _));
@@ -2342,6 +2380,110 @@ internal static class Program
             W(ok ? "RESULT: PASS" : "RESULT: FAIL"); WriteResultNamed(log, "selftest-collections-result.txt"); return ok ? 0 : 1;
         }
         catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-collections-result.txt"); return 2; }
+    }
+
+    // T40/F28 — Ctrl+A "select all in the current view": QueryAllIds must return EXACTLY the id set
+    // the gallery is paging through (count == Query total) across both fromWhere shapes + every filter.
+    static int SelectAllSelfTest()
+    {
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Select-all-the-view (T40/F28) self-test");
+            var path = FreshDb("selftest-selectall.db");
+            using var db = new LibraryDb(path);
+            for (int i = 0; i < 7; i++) db.Upsert(TestRow($"a{i}.png", "apple"));
+            for (int i = 0; i < 5; i++) db.Upsert(TestRow($"p{i}.png", "pear"));
+            Check("seed: 12 images", db.Query(SearchParser.Parse(""), 0, 1000, true).Total == 12);
+
+            // Core invariant: QueryAllIds count == Query total, exercising the no-token branch, the
+            // token branch (GROUP BY/HAVING), a quoted phrase, and the collection scope.
+            void Parity(string label, int total, int allCount)
+                => Check($"{label}: QueryAllIds count == Query total ({allCount}=={total})", allCount == total && total > 0);
+
+            Parity("all", db.Query(SearchParser.Parse(""), 0, 1000, true).Total, db.QueryAllIds(SearchParser.Parse(""), true).Count);
+            Parity("token 'apple'", db.Query(SearchParser.Parse("apple"), 0, 1000, true).Total, db.QueryAllIds(SearchParser.Parse("apple"), true).Count);
+            // Phrase search hits the no-token LIKE branch; every seeded row has Prompt="p" (TestRow), so "p" matches all 12.
+            Parity("phrase \"p\" (prompt LIKE)", db.Query(SearchParser.Parse("\"p\""), 0, 1000, true).Total, db.QueryAllIds(SearchParser.Parse("\"p\""), true).Count);
+
+            long col = db.CreateCollection("C");
+            long a0 = db.FindIdByAbsPath("a0.png")!.Value, a1 = db.FindIdByAbsPath("a1.png")!.Value, p0 = db.FindIdByAbsPath("p0.png")!.Value;
+            db.AddToCollection(col, new[] { a0, a1, p0 });
+            Parity("collection", db.Query(SearchParser.Parse(""), 0, 1000, true, collectionId: col).Total, db.QueryAllIds(SearchParser.Parse(""), true, collectionId: col).Count);
+            Parity("collection AND 'apple'", db.Query(SearchParser.Parse("apple"), 0, 1000, true, collectionId: col).Total, db.QueryAllIds(SearchParser.Parse("apple"), true, collectionId: col).Count);
+
+            // The id SET must equal the full paged set, and the token branch's GROUP BY must yield distinct ids.
+            var paged = db.Query(SearchParser.Parse("apple"), 0, 1000, true).Page.Select(r => r.Id).OrderBy(x => x).ToList();
+            var allids = db.QueryAllIds(SearchParser.Parse("apple"), true).OrderBy(x => x).ToList();
+            Check("token: QueryAllIds id set == paged id set", paged.SequenceEqual(allids));
+            Check("token 'apple' count = 7", allids.Count == 7);
+            Check("no duplicate ids (token branch)", allids.Count == allids.Distinct().Count());
+            Check("collection AND 'apple' = 2", db.QueryAllIds(SearchParser.Parse("apple"), true, collectionId: col).Count == 2);
+            Check("empty-result filter → 0 ids", db.QueryAllIds(SearchParser.Parse("zzznotokenzzz"), true).Count == 0);
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL"); WriteResultNamed(log, "selftest-selectall-result.txt"); return ok ? 0 : 1;
+        }
+        catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-selectall-result.txt"); return 2; }
+    }
+
+    // T36/F26 — scan reports real per-phase/per-file progress and is cancelable. Headless: capture the
+    // IProgress ticks and assert a canceled token throws + leaves the library unchanged (atomic batch).
+    private sealed class ListProgress : IProgress<HarvestProgress>
+    {
+        public readonly List<HarvestProgress> Items = new();
+        private readonly object _lock = new();
+        public void Report(HarvestProgress value) { lock (_lock) Items.Add(value); }
+    }
+
+    static int ScanProgressSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Scan progress + cancel (T36/F26) self-test");
+            var dir = Path.Combine(AppPaths.ExeDir, "selftest-scanprogress-fs");
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+            Directory.CreateDirectory(dir);
+            const int N = 6;
+            for (int i = 0; i < N; i++) MakePng(Path.Combine(dir, $"img{i}.png"), 32, 32, null);
+
+            // Part A — progress reporting (phases + advancing ticks).
+            var cap = new ListProgress();
+            using (var db = new LibraryDb(FreshDb("selftest-scanprogress.db")))
+            {
+                var r = new LocalScanner(db).Scan(new[] { dir }, default, cap);
+                Check($"scan added all {N}", r.Added == N && r.Failed == 0);
+            }
+            W($"  captured {cap.Items.Count} reports; phases: {string.Join(" → ", cap.Items.Select(p => p.Phase).Distinct())}");
+            Check("at least 2 progress reports", cap.Items.Count >= 2);
+            Check("'Scanning folders' reported indeterminate (Total==0)", cap.Items.Any(p => p.Phase == "Scanning folders" && p.Total == 0));
+            var reading = cap.Items.Where(p => p.Phase == "Reading metadata").ToList();
+            Check("'Reading metadata' reported with Total==N", reading.Count >= 1 && reading.All(p => p.Total == N));
+            Check("reading ticks advance (0 → N)", reading.Any(p => p.Current == 0) && reading.Any(p => p.Current == N));
+            Check("an 'Indexing' phase was reported", cap.Items.Any(p => p.Phase == "Indexing"));
+
+            // Part B — cancellation: a pre-canceled token throws and leaves the library unchanged
+            // (the upsert is one atomic batch AFTER all reads, so a cancel applies nothing).
+            using (var db2 = new LibraryDb(FreshDb("selftest-scanprogress-cancel.db")))
+            {
+                using var cts = new CancellationTokenSource();
+                cts.Cancel();
+                bool threw = false;
+                try { new LocalScanner(db2).Scan(new[] { dir }, cts.Token, null); }
+                catch (OperationCanceledException) { threw = true; }
+                Check("canceled scan throws OperationCanceledException", threw);
+                Check("canceled scan left the library unchanged (0 rows, no partial upsert)", db2.ImageCount(includeArchived: true) == 0);
+            }
+
+            try { Directory.Delete(dir, true); } catch { }
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL"); WriteResultNamed(log, "selftest-scanprogress-result.txt"); return ok ? 0 : 1;
+        }
+        catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-scanprogress-result.txt"); return 2; }
     }
 
     /// <summary>T27 Auto-Tag (suggest-only KNN): neighbors must be near AND have user tags; vote-rank;

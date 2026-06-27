@@ -32,6 +32,7 @@ public sealed class GalleryBridge
             return type switch
             {
                 "query" => HandleQuery(root),
+                "selectall" => HandleSelectAll(root),   // T40/F28 — ids for the whole current view
                 "ac" => HandleAutocomplete(root),
                 "inspect" => HandleInspect(root),
                 "counts" => HandleCounts(),
@@ -80,6 +81,26 @@ public sealed class GalleryBridge
             optimized = x.Optimized      // T31 — drives the ✨O card badge
         });
         return JsonSerializer.Serialize(new { type = "page", page, total, gen, items }, Json);
+    }
+
+    /// <summary>Return EVERY image id matching the current view's filter, no paging (T40/F28 — Ctrl+A
+    /// "select all in the current view"). Mirrors HandleQuery's filter extraction exactly (minus
+    /// page/size/gen) and calls QueryAllIds, so the selection matches what the grid is showing.</summary>
+    private string HandleSelectAll(JsonElement root)
+    {
+        var raw = root.TryGetProperty("raw", out var r) ? r.GetString() ?? "" : "";
+        var includeArchived = root.TryGetProperty("includeArchived", out var ia) && ia.ValueKind == JsonValueKind.True;
+        var untaggedOnly = root.TryGetProperty("untaggedOnly", out var uo) && uo.ValueKind == JsonValueKind.True;
+        var archivedOnly = root.TryGetProperty("archivedOnly", out var ao) && ao.ValueKind == JsonValueKind.True;
+        var favoritesOnly = root.TryGetProperty("favoritesOnly", out var fo) && fo.ValueKind == JsonValueKind.True;
+        var optimizedOnly = root.TryGetProperty("optimizedOnly", out var oo) && oo.ValueKind == JsonValueKind.True;
+        long? collectionId = root.TryGetProperty("collectionId", out var ci) && ci.ValueKind == JsonValueKind.Number ? ci.GetInt64() : (long?)null;
+        var folderPath = root.TryGetProperty("folderPath", out var fp) && fp.ValueKind == JsonValueKind.String ? fp.GetString() : null;
+        var folderRoot = root.TryGetProperty("folderRoot", out var fr) && fr.ValueKind == JsonValueKind.String ? fr.GetString() : null;
+        var includeSubfolders = root.TryGetProperty("includeSubfolders", out var isf) && isf.ValueKind == JsonValueKind.True;
+        var gen = root.TryGetProperty("gen", out var g) && g.ValueKind == JsonValueKind.Number ? g.GetInt32() : 0;   // echoed so the client drops a stale select-all after a view switch
+        var ids = _db.QueryAllIds(SearchParser.Parse(raw), includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders);
+        return JsonSerializer.Serialize(new { type = "allids", gen, ids }, Json);
     }
 
     /// <summary>Sidebar counts: All Images (non-archived), Unsorted (untagged), The Bog (archived).</summary>

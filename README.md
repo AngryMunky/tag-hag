@@ -15,7 +15,7 @@ Grab **`TheTagHag.exe`** from the [**Releases**](https://github.com/AngryMunky/t
 
 ## Features
 
-- **Scan** multiple source folders recursively; incremental re-scans skip unchanged files and prune deleted ones.
+- **Scan** multiple source folders recursively, with a live **0–100% cancelable progress** overlay; incremental re-scans skip unchanged files and prune deleted ones.
 - **Read generation metadata** from A1111 `parameters`, ComfyUI prompt graphs, JPEG/WebP EXIF, and `.txt` sidecars.
 - **Search** by prompt tags with type-ahead autocomplete (the "prompt matrix"): comma = AND, `"quotes"` = exact phrase.
 - **Gallery** with virtualized infinite scroll and a lazy 512px WebP **thumbnail cache** for fast load at scale.
@@ -25,7 +25,7 @@ Grab **`TheTagHag.exe`** from the [**Releases**](https://github.com/AngryMunky/t
 - **Auto-Tag** (suggest-only): proposes tags for an image from its visually-similar neighbours; you approve each one.
 - **Find Duplicates** by perceptual hash — exact and near-match.
 - **Folders**: your imported subfolders show up as a browsable sidebar tree — rename or move a folder in-app and the library follows on disk.
-- **File-manager action bar**: multi-select, then **Move / Rename / Delete**, bulk **Favorite**, or **Add to Collection**. In-library moves keep every image's favorites / notes / tags / collections attached.
+- **File-manager action bar**: multi-select (incl. **Ctrl+A to select the entire current view**, not just the loaded page), then **Move / Rename / Delete**, bulk **Favorite**, or **Add to Collection** — or **drag images straight onto a folder** in the sidebar to move them there on disk. In-library moves keep every image's favorites / notes / tags / collections attached.
 - **State-preserving re-link**: reorganise or rename files in Explorer and Tag Hag re-attaches all that user state on the next scan, matching moved files by perceptual hash.
 - **Library Optimization**: resample large images into a Tag-Hag-managed store that mirrors your source tree, then recycle the originals to reclaim disk — for one image, a selection, or the **whole library**. Format-preserving (no transcode), metadata-preserving, idempotent, with a preview tally before it runs.
 - **Export & cull**: bulk **Copy** into a confined export tree, **Archive** to the Bog, or **Delete** (Recycle Bin — recoverable).
@@ -55,8 +55,9 @@ The engine has a headless self-test harness (the GUI is verified in-app). Each p
 ```sh
 TheTagHag.exe --selftest          # SQLite + FTS5 smoke test
 TheTagHag.exe --selftest-scan tests\fixtures
-# feature suites: -db -dupes -v4migrate -optimizelib -optindicator -relink
-#                 -folders -filemanager -favorites -notes -usertags -collections -autotag
+# feature suites: -db -dupes -v4migrate -optimizelib -optindicator -relink -folders
+#                 -filemanager -favorites -notes -usertags -collections -autotag
+#                 -selectall -scanprogress
 ```
 
 Regenerate the app icon from the brand mark:

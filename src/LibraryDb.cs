@@ -380,6 +380,32 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
     /// </summary>
     public (IReadOnlyList<ImageRow> Page, int Total) Query(SearchFilter f, int page, int size, bool includeArchived, bool untaggedOnly = false, bool archivedOnly = false, bool favoritesOnly = false, long? collectionId = null, bool optimizedOnly = false, string? folderPath = null, string? folderRoot = null, bool includeSubfolders = false)
     {
+        var (fromWhere, ps) = BuildFromWhere(f, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders);
+
+        int total = f.Tokens.Count > 0
+            ? Convert.ToInt32(Scalar($"SELECT COUNT(*) FROM (SELECT i.id {fromWhere});", ps.ToArray()) ?? 0)
+            : Convert.ToInt32(Scalar($"SELECT COUNT(*) {fromWhere};", ps.ToArray()) ?? 0);
+
+        var rows = new List<ImageRow>();
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.CommandText = $"SELECT i.* {fromWhere} ORDER BY i.id LIMIT $lim OFFSET $off;";
+            foreach (var (n, v) in ps) cmd.Parameters.AddWithValue(n, v);
+            cmd.Parameters.AddWithValue("$lim", size);
+            cmd.Parameters.AddWithValue("$off", page * size);
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read()) rows.Add(MapRow(rd));
+        }
+        return (rows, total);
+    }
+
+    /// <summary>Build the shared FROM/WHERE fragment + bound params for a gallery query (T40 refactor).
+    /// Extracted from <see cref="Query"/> so the paged query AND <see cref="QueryAllIds"/> build the
+    /// EXACT same predicate — keeping "select all in the current view" identical to what the grid shows
+    /// and preserving the single-fromWhere page==total invariant. The token branch ends in
+    /// GROUP BY i.id HAVING …; the no-token branch is a plain WHERE.</summary>
+    private (string FromWhere, List<(string, object)> Ps) BuildFromWhere(SearchFilter f, bool includeArchived, bool untaggedOnly, bool archivedOnly, bool favoritesOnly, long? collectionId, bool optimizedOnly, string? folderPath, string? folderRoot, bool includeSubfolders)
+    {
         var where = new List<string>();
         var ps = new List<(string, object)>();
         if (archivedOnly) where.Add("i.archived=1");          // "The Bog" view = archived only
@@ -441,22 +467,23 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
             var w = where.Count > 0 ? " WHERE " + string.Join(" AND ", where) : "";
             fromWhere = $"FROM images i{w}";
         }
+        return (fromWhere, ps);
+    }
 
-        int total = f.Tokens.Count > 0
-            ? Convert.ToInt32(Scalar($"SELECT COUNT(*) FROM (SELECT i.id {fromWhere});", ps.ToArray()) ?? 0)
-            : Convert.ToInt32(Scalar($"SELECT COUNT(*) {fromWhere};", ps.ToArray()) ?? 0);
-
-        var rows = new List<ImageRow>();
-        using (var cmd = _con.CreateCommand())
-        {
-            cmd.CommandText = $"SELECT i.* {fromWhere} ORDER BY i.id LIMIT $lim OFFSET $off;";
-            foreach (var (n, v) in ps) cmd.Parameters.AddWithValue(n, v);
-            cmd.Parameters.AddWithValue("$lim", size);
-            cmd.Parameters.AddWithValue("$off", page * size);
-            using var rd = cmd.ExecuteReader();
-            while (rd.Read()) rows.Add(MapRow(rd));
-        }
-        return (rows, total);
+    /// <summary>Every image id matching a gallery filter, no paging (T40/F28 — Ctrl+A "select all in
+    /// the current view"). Reuses <see cref="BuildFromWhere"/> so the id set is identical to what the
+    /// grid is paging through (its Count equals Query's Total). SELECT i.id only — no row hydration.
+    /// The token branch's GROUP BY i.id yields one row per matching image, so ids are distinct.</summary>
+    public IReadOnlyList<long> QueryAllIds(SearchFilter f, bool includeArchived, bool untaggedOnly = false, bool archivedOnly = false, bool favoritesOnly = false, long? collectionId = null, bool optimizedOnly = false, string? folderPath = null, string? folderRoot = null, bool includeSubfolders = false)
+    {
+        var (fromWhere, ps) = BuildFromWhere(f, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders);
+        var list = new List<long>();
+        using var cmd = _con.CreateCommand();
+        cmd.CommandText = $"SELECT i.id {fromWhere} ORDER BY i.id;";
+        foreach (var (n, v) in ps) cmd.Parameters.AddWithValue(n, v);
+        using var rd = cmd.ExecuteReader();
+        while (rd.Read()) list.Add(rd.GetInt64(0));
+        return list;
     }
 
     /// <summary>Move a row to archived state at a new on-disk path (the Bog). Query hides archived by default.</summary>

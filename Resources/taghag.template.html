@@ -194,6 +194,22 @@
   .folrow .act span{cursor:pointer;color:#8b8195;font-size:11px;padding:0 3px}
   .folrow .act span:hover{color:#ece5d6}
   .folrow.root .l{font-weight:600;color:#cfc6dc}
+  /* T35/F25 — drag images onto a folder */
+  .folrow.drop{background:rgba(164,255,106,.18);box-shadow:inset 0 0 0 1.5px var(--acid);color:#ece5d6}
+  .folrow.drop .cnt,.folrow.drop .ico{color:var(--acid)}
+  .dragghost{position:absolute;top:-1000px;left:-1000px;z-index:9999;pointer-events:none;padding:6px 12px;border-radius:999px;
+    background:var(--acid);color:#141018;font:600 12.5px Inter,system-ui,sans-serif;box-shadow:0 6px 18px rgba(0,0,0,.5);white-space:nowrap}
+  /* T36/F26 — import/scan progress overlay (covers only #gridwrap → sidebar + top bar stay usable) */
+  #scanoverlay{position:fixed;z-index:60;display:none;align-items:center;justify-content:center;background:rgba(20,16,24,.62)}
+  #scanoverlay .scancard{min-width:300px;max-width:78%;padding:22px 26px;border-radius:14px;background:#1b1620;border:1px solid #3a3344;box-shadow:0 18px 48px rgba(0,0,0,.6);text-align:center}
+  #scanoverlay .scanphase{font:600 14px Inter,system-ui,sans-serif;color:#ece5d6;margin-bottom:14px;max-width:60ch;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #scanoverlay .scantrack{height:8px;border-radius:999px;background:#2b2a33;overflow:hidden}
+  #scanoverlay .scantrack>div{height:100%;width:0;border-radius:999px;background:var(--acid);transition:width .15s ease}
+  #scanoverlay.indet .scantrack>div{width:34%;transition:none;animation:scanmarch 1.1s linear infinite}
+  @keyframes scanmarch{0%{transform:translateX(-130%)}100%{transform:translateX(330%)}}
+  #scanoverlay .scanpct{font:600 12px Inter,system-ui,sans-serif;color:var(--acid);margin-top:8px;min-height:15px}
+  #scanoverlay .scanbtn{margin-top:16px;padding:7px 18px;border:1px solid #4a4356;border-radius:999px;background:#2b2a33;color:#d8d0bf;font:600 12px Inter,system-ui,sans-serif;cursor:pointer}
+  #scanoverlay .scanbtn:hover{background:#3a3344;color:#ece5d6}
   #folsub.on{color:var(--acid);background:rgba(164,255,106,.10)}
   #colpick,#movepick,#moremenu{position:absolute;bottom:66px;left:50%;transform:translateX(-50%);min-width:240px;max-height:300px;overflow:auto;
     background:rgba(24,18,32,.98);backdrop-filter:blur(14px);border:1px solid #362a4c;border-radius:11px;
@@ -312,6 +328,15 @@
     <div id="gridwrap">
       <div id="grid"></div>
       <div id="sentinel"></div>
+      <!-- T36/F26 import/scan progress overlay (geometry set in JS to the #gridwrap rect) -->
+      <div id="scanoverlay">
+        <div class="scancard">
+          <div id="scanphase" class="scanphase">Scanning…</div>
+          <div class="scantrack"><div id="scanbarfill"></div></div>
+          <div id="scanpct" class="scanpct"></div>
+          <button id="scancancelbtn" class="scanbtn">Cancel</button>
+        </div>
+      </div>
       <div id="emptymsg">
         <div class="hat-halo"><div class="hat"><div class="brim"></div><div class="eye"></div></div></div>
         <div id="emptytitle" class="cinzel">The hoard is quiet… for now.</div>
@@ -529,6 +554,10 @@
     lastIdx=idx; updateBar(); requestInspect(idx); }
   function requestInspect(idx){ panelIdx=idx; post({type:'inspect',id:loaded[idx].id,target:'panel'}); }
   function selectAllLoaded(){ loaded.forEach((it,i)=>{sel.add(it.id);paintCard(i);}); updateBar(); }
+  // T40/F28 — select EVERY image in the current view (not just the loaded page). Freeze the active
+  // filter (raw + flags) at request time; the host replies {type:'allids',ids}. Dupes is a bespoke,
+  // fully-loaded set (no Query filter) → fall back to selectAllLoaded.
+  function selectAllView(){ if(dupeMode){ selectAllLoaded(); return; } post({type:'selectall',raw,gen,...flags()}); }
   document.querySelectorAll('#actionbar .pill[data-op]').forEach(b=>b.onclick=()=>doOp(b.dataset.op));
   $('#selclear').onclick=clearSel;
   function doOp(op){ if(!sel.size)return; post({type:'op',op,ids:[...sel]}); }
@@ -592,6 +621,44 @@
   $('#pill-addcol').onclick=(e)=>{ e.stopPropagation(); openColPicker(); };
   $('#colnew').onclick=()=>{ const n=(prompt('New collection name:')||'').trim(); if(n) post({type:'colcreate',name:n}); };
 
+  // ---- T35/F25 drag images onto a Folders-sidebar row (state-preserving in-library move) ----
+  // Reuses the exact `moveto` the Move-to picker sends (see openMovePicker). Folders-only: Library/Collection
+  // rows are NOT drop targets in v2.2. Native HTML5 DnD gives us the click-vs-drag threshold for free (U21).
+  let dragIds=[], dragGhost=null, dragScrollDir=0, dragScrollRAF=null;
+  const folnavEl=$('#folnav'), sidebarEl=$('#sidebar');
+  function cardDragStart(e,idx){
+    const id=loaded[idx].id;
+    // whole selection if the dragged card is part of it, else just this card (the :610 idiom)
+    dragIds=(sel.has(id)&&sel.size>0)?[...sel]:[id];
+    try{ e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/plain',String(dragIds.length)); }catch(_){}
+    const n=dragIds.length;
+    dragGhost=document.createElement('div'); dragGhost.className='dragghost';
+    dragGhost.textContent='⤳ '+n+' image'+(n===1?'':'s'); document.body.appendChild(dragGhost);
+    try{ e.dataTransfer.setDragImage(dragGhost,14,14); }catch(_){}
+  }
+  function cardDragEnd(){ dragIds=[]; clearDropHi(); setDragScroll(0); if(dragGhost){ dragGhost.remove(); dragGhost=null; } }
+  function clearDropHi(){ folnavEl.querySelectorAll('.folrow.drop').forEach(r=>r.classList.remove('drop')); }
+  function dragAutoScroll(){ if(dragScrollDir!==0 && sidebarEl){ sidebarEl.scrollTop+=dragScrollDir*12; dragScrollRAF=requestAnimationFrame(dragAutoScroll); } else { dragScrollRAF=null; } }
+  function setDragScroll(dir){ dragScrollDir=dir; if(dir!==0 && !dragScrollRAF) dragScrollRAF=requestAnimationFrame(dragAutoScroll); }
+  folnavEl.addEventListener('dragover',e=>{
+    if(!dragIds.length) return;                                  // ignore drags that aren't our cards
+    const row=e.target.closest('.folrow');
+    if(!row){ clearDropHi(); setDragScroll(0); return; }         // not over a folder row → no drop, no highlight
+    e.preventDefault(); try{ e.dataTransfer.dropEffect='move'; }catch(_){}
+    if(!row.classList.contains('drop')){ clearDropHi(); row.classList.add('drop'); }
+    if(sidebarEl){ const r=sidebarEl.getBoundingClientRect(), EDGE=46;                 // auto-scroll near the sidebar edges
+      setDragScroll(e.clientY<r.top+EDGE?-1:(e.clientY>r.bottom-EDGE?1:0)); }
+  });
+  folnavEl.addEventListener('dragleave',e=>{ if(!e.relatedTarget||!folnavEl.contains(e.relatedTarget)){ clearDropHi(); setDragScroll(0); } });
+  folnavEl.addEventListener('drop',e=>{
+    if(!dragIds.length) return;
+    const row=e.target.closest('.folrow'); clearDropHi(); setDragScroll(0);
+    if(!row) return;
+    e.preventDefault();
+    const ids=dragIds.slice(); dragIds=[];
+    post({type:'moveto',targetKind:'folder',ids,root:row.dataset.froot,path:row.dataset.fpath});   // same contract as the picker (:571)
+  });
+
   // ---- right-click menu ----
   const ctx=$('#ctx'); let ctxIdx=-1;
   function showCtx(x,y,idx){ ctxIdx=idx;
@@ -613,8 +680,8 @@
   window.addEventListener('blur',()=>hideCtx());
 
   function addCards(items){ for(const it of items){ const idx=loaded.length; it.name=it.name||fileName(it); loaded.push(it);
-    const c=document.createElement('div'); c.className='card'; c.title=it.prompt||''; c.dataset.idx=idx;
-    const img=document.createElement('img'); img.loading='lazy'; img.src='https://thumb.local/'+it.id;
+    const c=document.createElement('div'); c.className='card'; c.title=it.prompt||''; c.dataset.idx=idx; c.draggable=true;   // T35/F25
+    const img=document.createElement('img'); img.loading='lazy'; img.draggable=false; img.src='https://thumb.local/'+it.id;   // img.draggable=false → card drag wins (T35)
     img.onerror=()=>{ if(!img.dataset.fb){img.dataset.fb='1';img.src=it.url;} else img.remove(); };
     c.appendChild(img);
     const sh=document.createElement('div'); sh.className='shade'; c.appendChild(sh);
@@ -628,6 +695,7 @@
     if(it.optimized){ const ob=document.createElement('div'); ob.className='optbadge'; ob.textContent='✨O'; ob.title='Optimized'; c.appendChild(ob); }   // T31
     c.onclick=(e)=>selectClick(idx,e);
     c.ondblclick=()=>openLb(idx);
+    c.ondragstart=(e)=>cardDragStart(e,idx); c.ondragend=cardDragEnd;   // T35/F25 drag-to-folder
     c.oncontextmenu=(e)=>{ e.preventDefault(); if(!sel.has(it.id)){ /* right-click a non-selected card targets just it */ } showCtx(e.clientX,e.clientY,idx); };
     grid.appendChild(c);
     if(sel.has(it.id)) paintCard(idx);
@@ -831,11 +899,28 @@
       const img=document.createElement('img'); img.loading='lazy'; img.src='https://thumb.local/'+n.id; img.onerror=()=>{img.src=n.url;};
       d.appendChild(img); const cap=document.createElement('div'); cap.className='d'; cap.textContent='Δ'+n.distance; d.appendChild(cap); nb.appendChild(d); }); }
 
+  // ---- T36/F26 import/scan progress overlay (over #gridwrap; sidebar + top bar stay usable) ----
+  const scanOv=$('#scanoverlay'), scanFill=$('#scanbarfill'), scanPhaseEl=$('#scanphase'), scanPctEl=$('#scanpct');
+  function placeScanOv(){ const r=$('#gridwrap').getBoundingClientRect();
+    scanOv.style.left=r.left+'px'; scanOv.style.top=r.top+'px'; scanOv.style.width=r.width+'px'; scanOv.style.height=r.height+'px'; }
+  function hideScan(){ scanOv.style.display='none'; scanOv.classList.remove('indet'); }
+  function updateScan(phase,current,total){ placeScanOv(); scanOv.style.display='flex';
+    if(total>0){ scanOv.classList.remove('indet'); const pct=Math.max(0,Math.min(100,Math.round(current/total*100)));
+      scanFill.style.width=pct+'%'; scanPctEl.textContent=pct+'%'; scanPhaseEl.textContent=phase+' · '+current.toLocaleString()+' / '+total.toLocaleString(); }
+    else { scanOv.classList.add('indet'); scanPctEl.textContent=current>0?current.toLocaleString()+' found':''; scanPhaseEl.textContent=phase+'…'; } }
+  function scanDone(m){ scanOv.classList.remove('indet');
+    if(m.canceled){ scanPhaseEl.textContent='Canceled — '+(m.total>0?(m.read||0).toLocaleString()+' / '+m.total.toLocaleString()+' read; ':'')+'library unchanged.'; scanFill.style.width='0%'; scanPctEl.textContent=''; }
+    else { let s='Imported '+(m.added||0).toLocaleString(); if(m.updated)s+=' · '+m.updated.toLocaleString()+' updated'; if(m.removed)s+=' · '+m.removed.toLocaleString()+' removed'; if(m.failed)s+=' · '+m.failed.toLocaleString()+' skipped'; if(m.reLinked)s+=' · ↺ '+m.reLinked.toLocaleString()+' re-linked';
+      scanPhaseEl.textContent=s; scanFill.style.width='100%'; scanPctEl.textContent='100%'; }
+    setTimeout(hideScan, m.canceled?1500:1100); }
+  $('#scancancelbtn').onclick=()=>{ post({type:'scancancel'}); scanOv.classList.add('indet'); scanPhaseEl.textContent='Cancelling…'; scanPctEl.textContent=''; };
+  window.addEventListener('resize',()=>{ if(scanOv.style.display==='flex') placeScanOv(); });
+
   // ---- keyboard ----
   document.addEventListener('keydown',e=>{
     if(lb.classList.contains('open')){ if(e.key==='Escape')closeLb(); else if(e.key==='ArrowLeft'&&cur>0)openLb(cur-1); else if(e.key==='ArrowRight'&&cur<loaded.length-1)openLb(cur+1); return; }
     if(document.activeElement===search) return;
-    if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='a'){ selectAllLoaded(); e.preventDefault(); }
+    if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='a'){ selectAllView(); e.preventDefault(); }   // T40/F28 — whole view, not just loaded
     else if(e.key==='Escape'){ if(ctx.style.display==='block')hideCtx(); else if(sel.size)clearSel(); }
     else if(e.key==='Delete'||e.key==='Backspace'){ if(sel.size){ doOp('delete'); e.preventDefault(); } } });
 
@@ -855,6 +940,10 @@
       if(!m.items||m.items.length<SIZE)exhausted=true;
       countEl.textContent=total.toLocaleString()+' item'+(total===1?'':'s');
       if(total===0) showEmpty(); else emptyMsg.style.display='none'; }
+    else if(m.type==='allids'){ if(m.gen!==undefined && m.gen!==gen) return;   // drop a stale select-all after a view switch
+      sel=new Set(m.ids||[]); loaded.forEach((it,i)=>paintCard(i)); updateBar(); }   // T40/F28 — select-all-the-view; true count in the bar
+    else if(m.type==='progress'){ updateScan(m.phase||'Working', m.current||0, m.total||0); }   // T36/F26 import/scan overlay
+    else if(m.type==='scandone'){ scanDone(m); }                                                  // T36/F26 completion summary
     else if(m.type==='ac'){ if(m.acTarget==='tags'){ tagAcItems=(m.items||[]).slice(0,8); tagAcSel=-1; paintTagAc(); }
       else { acItems=(m.items||[]).slice(0,8); acSel=-1; paintAc(); } }
     else if(m.type==='counts'){ $('#cnt-all').textContent=(m.all||0).toLocaleString(); $('#cnt-unsorted').textContent=(m.unsorted||0).toLocaleString(); $('#cnt-bog').textContent=(m.bog||0).toLocaleString();
