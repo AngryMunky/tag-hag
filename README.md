@@ -11,7 +11,7 @@ A portable, single-file **Windows desktop app** for managing a large local libra
 
 ## Download
 
-Grab the latest **`TheTagHag-vX.Y.Z-win-x64.exe`** from the [**Releases**](https://github.com/AngryMunky/tag-hag/releases/latest) page — one self-contained file. No installer, no .NET required; just run it.
+Grab **`TheTagHag.exe`** from the [**Releases**](https://github.com/AngryMunky/tag-hag/releases/latest) page — one self-contained file. No installer, no .NET required; just run it.
 
 ## Features
 
