@@ -1,7 +1,12 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using Microsoft.Data.Sqlite;
 
 namespace TheTagHag;
+
+/// <summary>T44 — returned by <see cref="LibraryDb.OptimizePreview"/> so callers get strongly-typed
+/// fields. Positional record Deconstruct preserves backward compat with existing tuple-destructuring
+/// callers (<c>var (count, skip, bytes) = db.OptimizePreview(…);</c>).</summary>
+public readonly record struct OptimizePreviewResult(int Count, int Skip, long Bytes);
 
 /// <summary>
 /// Owns library.db (the live local store). Designed for a SINGLE writer thread; callers
@@ -22,8 +27,11 @@ public sealed class LibraryDb : IDisposable
     /// separate tables/columns that UpsertCore never touches, so a rescan can't wipe it.
     /// v4 (additive, v2.1) adds images.optimized + opt_dim + opt_at (managed-store optimization
     /// state). Like favorite, 'optimized' is post-scan state EXCLUDED from UpsertCore, so a rescan
-    /// of the managed store keeps it. See MarkOptimized + AppPaths.LibraryStoreDir.</summary>
-    public const int SchemaVersion = 4;
+    /// of the managed store keeps it. See MarkOptimized + AppPaths.LibraryStoreDir.
+    /// v5 (additive, v2.3) adds collections.parent_id (nullable FK back to collections.id) enabling
+    /// nested collections (F29). NO ON DELETE CASCADE — deleting a parent PROMOTES its children
+    /// (re-parents them one level up) in code (R28). ix_collections_parent is built in Migrate().</summary>
+    public const int SchemaVersion = 5;
 
     private readonly SqliteConnection _con;
 
@@ -140,9 +148,12 @@ CREATE TRIGGER IF NOT EXISTS utags_ad AFTER DELETE ON user_tags BEGIN
 END;
 
 -- Named collections (many-to-many groups). Case-insensitive unique names.
+-- parent_id (v5/T41) enables nesting: NULL = root. NO ON DELETE CASCADE — deleting a
+-- parent PROMOTES its children in code (R28). index ix_collections_parent is built in Migrate().
 CREATE TABLE IF NOT EXISTS collections (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
+  parent_id INTEGER REFERENCES collections(id),
   UNIQUE(name COLLATE NOCASE)
 );
 
@@ -184,16 +195,19 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
                 Exec("ALTER TABLE images ADD COLUMN opt_dim INTEGER;");
                 Exec("ALTER TABLE images ADD COLUMN opt_at TEXT;");
             }
+            // v4 → v5: add parent_id to collections (nested collections, F29/T41). NULL default =
+            // existing collections become roots. ADD COLUMN with a NULL default is metadata-only in
+            // SQLite — instant on any size DB. No ON DELETE CASCADE (R28 — children are promoted in code).
+            if (current < 5 && !ColumnExists("collections", "parent_id"))
+                Exec("ALTER TABLE collections ADD COLUMN parent_id INTEGER REFERENCES collections(id);");
         }
 
-        // Indexes over columns that arrive via ALTER (phash @ v2, favorite @ v3, optimized @ v4) live
-        // HERE, not in EnsureSchema: EnsureSchema runs FIRST, and on an older DB the column doesn't
-        // exist yet, so a CREATE INDEX … ON images(<col>) there throws 'no such column' and crashes
-        // the open. By this point the column is guaranteed present on every path (fresh: born in
-        // EnsureSchema; upgraded: ALTERed just above). All are idempotent (IF NOT EXISTS).
+        // Indexes over columns that arrive via ALTER live HERE, not in EnsureSchema: on an older DB
+        // the column doesn't exist yet when EnsureSchema runs. All are idempotent (IF NOT EXISTS).
         Exec("CREATE INDEX IF NOT EXISTS ix_images_phash ON images(phash);");
         Exec("CREATE INDEX IF NOT EXISTS ix_images_favorite ON images(favorite);");
         Exec("CREATE INDEX IF NOT EXISTS ix_images_optimized ON images(optimized);");
+        Exec("CREATE INDEX IF NOT EXISTS ix_collections_parent ON collections(parent_id);");
 
         if (current is null || current < SchemaVersion)
             SetMeta("schema_version", SchemaVersion.ToString());
@@ -378,9 +392,9 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
     /// Search: comma-AND tokens (image_tags join + HAVING COUNT(DISTINCT)=N) plus one
     /// prompt LIKE per quoted phrase, plus the archived filter. Returns a page + total count.
     /// </summary>
-    public (IReadOnlyList<ImageRow> Page, int Total) Query(SearchFilter f, int page, int size, bool includeArchived, bool untaggedOnly = false, bool archivedOnly = false, bool favoritesOnly = false, long? collectionId = null, bool optimizedOnly = false, string? folderPath = null, string? folderRoot = null, bool includeSubfolders = false)
+    public (IReadOnlyList<ImageRow> Page, int Total) Query(SearchFilter f, int page, int size, bool includeArchived, bool untaggedOnly = false, bool archivedOnly = false, bool favoritesOnly = false, long? collectionId = null, bool optimizedOnly = false, string? folderPath = null, string? folderRoot = null, bool includeSubfolders = false, bool includeSubcollections = false)
     {
-        var (fromWhere, ps) = BuildFromWhere(f, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders);
+        var (fromWhere, ps) = BuildFromWhere(f, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders, includeSubcollections);
 
         int total = f.Tokens.Count > 0
             ? Convert.ToInt32(Scalar($"SELECT COUNT(*) FROM (SELECT i.id {fromWhere});", ps.ToArray()) ?? 0)
@@ -404,7 +418,7 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
     /// EXACT same predicate — keeping "select all in the current view" identical to what the grid shows
     /// and preserving the single-fromWhere page==total invariant. The token branch ends in
     /// GROUP BY i.id HAVING …; the no-token branch is a plain WHERE.</summary>
-    private (string FromWhere, List<(string, object)> Ps) BuildFromWhere(SearchFilter f, bool includeArchived, bool untaggedOnly, bool archivedOnly, bool favoritesOnly, long? collectionId, bool optimizedOnly, string? folderPath, string? folderRoot, bool includeSubfolders)
+    private (string FromWhere, List<(string, object)> Ps) BuildFromWhere(SearchFilter f, bool includeArchived, bool untaggedOnly, bool archivedOnly, bool favoritesOnly, long? collectionId, bool optimizedOnly, string? folderPath, string? folderRoot, bool includeSubfolders, bool includeSubcollections = false)
     {
         var where = new List<string>();
         var ps = new List<(string, object)>();
@@ -416,10 +430,31 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
         // no-token branches AND the COUNT (one fromWhere → page==total, no desync).
         if (favoritesOnly) where.Add("i.favorite=1");                                  // Favorites view (T24)
         if (optimizedOnly) where.Add("i.optimized=1");                                 // Optimized view (T31)
-        if (collectionId is long cid)                                                  // Collection view (T28)
+        if (collectionId is long cid)                                                  // Collection view (T28/T41)
         {
-            where.Add("i.id IN (SELECT image_id FROM collection_items WHERE collection_id=$cid)");
-            ps.Add(("$cid", cid));
+            if (includeSubcollections)
+            {
+                // Walk the in-memory tree to collect this node + all descendants, then fold into a
+                // single IN(…) predicate. The C# walk keeps the page==total invariant (one fromWhere
+                // shared by Query + QueryAllIds + COUNT) and matches the T40 select-all parity guarantee.
+                var descIds = CollectionAndDescendantIds(cid);
+                if (descIds.Count == 1)
+                {
+                    where.Add("i.id IN (SELECT image_id FROM collection_items WHERE collection_id=$cid)");
+                    ps.Add(("$cid", cid));
+                }
+                else
+                {
+                    var placeholders = descIds.Select((_, i) => $"$cid{i}").ToList();
+                    where.Add($"i.id IN (SELECT image_id FROM collection_items WHERE collection_id IN ({string.Join(",", placeholders)}))");
+                    for (int i = 0; i < descIds.Count; i++) ps.Add(($"$cid{i}", descIds[i]));
+                }
+            }
+            else
+            {
+                where.Add("i.id IN (SELECT image_id FROM collection_items WHERE collection_id=$cid)");
+                ps.Add(("$cid", cid));
+            }
         }
         // Folder view (T33/F24): scoped to a (folderRoot, folderPath) node so identical rel-dirs in
         // different roots — the managed store is always a second root — don't merge. folderPath is a
@@ -474,9 +509,9 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
     /// the current view"). Reuses <see cref="BuildFromWhere"/> so the id set is identical to what the
     /// grid is paging through (its Count equals Query's Total). SELECT i.id only — no row hydration.
     /// The token branch's GROUP BY i.id yields one row per matching image, so ids are distinct.</summary>
-    public IReadOnlyList<long> QueryAllIds(SearchFilter f, bool includeArchived, bool untaggedOnly = false, bool archivedOnly = false, bool favoritesOnly = false, long? collectionId = null, bool optimizedOnly = false, string? folderPath = null, string? folderRoot = null, bool includeSubfolders = false)
+    public IReadOnlyList<long> QueryAllIds(SearchFilter f, bool includeArchived, bool untaggedOnly = false, bool archivedOnly = false, bool favoritesOnly = false, long? collectionId = null, bool optimizedOnly = false, string? folderPath = null, string? folderRoot = null, bool includeSubfolders = false, bool includeSubcollections = false)
     {
-        var (fromWhere, ps) = BuildFromWhere(f, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders);
+        var (fromWhere, ps) = BuildFromWhere(f, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders, includeSubcollections);
         var list = new List<long>();
         using var cmd = _con.CreateCommand();
         cmd.CommandText = $"SELECT i.id {fromWhere} ORDER BY i.id;";
@@ -727,41 +762,53 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
         return "1"; // all
     }
 
-    /// <summary>Ids eligible to optimize within a scope at the given <paramref name="maxDim"/>: not
-    /// archived, not already optimized, and NOT already within the size target (using the stored
-    /// width/height — rows with unknown dims are included and the runtime re-checks). Oldest-first.
-    /// Excluding already-within-budget rows here (rather than only at runtime) keeps the preview honest
-    /// and lets a later re-run at a SMALLER maxDim pick up images that were within the old budget.</summary>
-    public IReadOnlyList<long> OptimizeEligibleIds(string? scope, int maxDim, IReadOnlyList<long>? ids)
+    /// <summary>Ids eligible to optimize within a scope. SourceFolders mode: not archived, not already
+    /// optimized, and (Downsample only) not already within the size target. Collections mode: not
+    /// archived — includes already-optimized images because they may need relocation to a collection
+    /// path (T44/F31); no size filter (even small images move to their collection location). Oldest-first.</summary>
+    public IReadOnlyList<long> OptimizeEligibleIds(string? scope, int maxDim, IReadOnlyList<long>? ids,
+        OptimizeMode mode = OptimizeMode.Downsample,
+        OrganizeBy organizeBy = OrganizeBy.SourceFolders)
     {
         var ps = new List<(string, object)>();
         var clause = ScopeClause(scope, ids, ps);
-        ps.Add(("$omd", maxDim));
+        string filter;
+        if (organizeBy == OrganizeBy.Collections)
+            filter = "";  // include optimized rows; no size filter (they all move to collection path)
+        else if (mode == OptimizeMode.Downsample)
+        { ps.Add(("$omd", maxDim)); filter = " AND optimized=0 AND (width IS NULL OR height IS NULL OR width > $omd OR height > $omd)"; }
+        else filter = " AND optimized=0";   // MoveOnly: all non-optimized regardless of size
         var list = new List<long>();
         using var cmd = _con.CreateCommand();
-        cmd.CommandText = $"SELECT id FROM images WHERE ({clause}) AND archived=0 AND optimized=0 " +
-                          "AND (width IS NULL OR height IS NULL OR width > $omd OR height > $omd) ORDER BY id;";
+        cmd.CommandText = $"SELECT id FROM images WHERE ({clause}) AND archived=0{filter} ORDER BY id;";
         foreach (var (n, v) in ps) cmd.Parameters.AddWithValue(n, v);
         using var rd = cmd.ExecuteReader();
         while (rd.Read()) list.Add(rd.GetInt64(0));
         return list;
     }
 
-    /// <summary>Cheap preview tally for a scope at <paramref name="maxDim"/> (no disk reads):
-    /// Count = images that WILL be optimized (eligible), Skip = the rest in scope (already optimized OR
-    /// already within budget), Bytes = SUM(size_bytes) of the eligible set. Bytes is an ESTIMATE of the
-    /// current footprint of those images — the post-resample saving is only known once the job runs.</summary>
-    public (int Count, int Skip, long Bytes) OptimizePreview(string? scope, int maxDim, IReadOnlyList<long>? ids)
+    /// <summary>Cheap preview tally for a scope (no disk reads): Count = images that WILL be processed
+    /// (eligible), Skip = the rest in scope (already optimized OR already within budget for Downsample),
+    /// Bytes = SUM(size_bytes) of the eligible set. MoveOnly counts all non-optimized regardless of size.
+    /// Collections mode includes optimized rows (they may need relocation — T44/F31).</summary>
+    public OptimizePreviewResult OptimizePreview(string? scope, int maxDim, IReadOnlyList<long>? ids,
+        OptimizeMode mode = OptimizeMode.Downsample,
+        OrganizeBy organizeBy = OrganizeBy.SourceFolders)
     {
         var ps = new List<(string, object)>();
         var clause = ScopeClause(scope, ids, ps);
-        ps.Add(("$omd", maxDim));
+        string sizeFilter;
+        if (organizeBy == OrganizeBy.Collections)
+            sizeFilter = "";  // all non-archived rows are candidates
+        else if (mode == OptimizeMode.Downsample)
+        { ps.Add(("$omd", maxDim)); sizeFilter = " AND optimized=0 AND (width IS NULL OR height IS NULL OR width > $omd OR height > $omd)"; }
+        else sizeFilter = " AND optimized=0";
         var arr = ps.ToArray();
-        var elig = $"({clause}) AND archived=0 AND optimized=0 AND (width IS NULL OR height IS NULL OR width > $omd OR height > $omd)";
+        var elig = $"({clause}) AND archived=0{sizeFilter}";
         int count = Convert.ToInt32(Scalar($"SELECT COUNT(*) FROM images WHERE {elig};", arr) ?? 0);
         int inScope = Convert.ToInt32(Scalar($"SELECT COUNT(*) FROM images WHERE ({clause}) AND archived=0;", arr) ?? 0);
         long bytes = Convert.ToInt64(Scalar($"SELECT COALESCE(SUM(size_bytes),0) FROM images WHERE {elig};", arr) ?? 0L);
-        return (count, inScope - count, bytes);
+        return new OptimizePreviewResult(count, inScope - count, bytes);
     }
 
     /// <summary>Full row by id (lightbox / inspector).</summary>
@@ -933,7 +980,7 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
         return list;
     }
 
-    /// <summary>Collections name-sorted (COLLATE NOCASE) with their membership count.</summary>
+    /// <summary>Collections name-sorted (COLLATE NOCASE) with their membership count (flat list, for legacy callers).</summary>
     public IReadOnlyList<(long Id, string Name, int Count)> ListCollections()
     {
         var list = new List<(long, string, int)>();
@@ -946,14 +993,97 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
         return list;
     }
 
-    /// <summary>Create a collection. Returns its id, or -1 if the name already exists (UNIQUE NOCASE).</summary>
-    public long CreateCollection(string name)
+    /// <summary>Build the nested <see cref="CollectionNode"/> tree (T41/F29). Each node's
+    /// <c>Count</c> is the direct membership count; <c>CountRecursive</c> includes all descendants.
+    /// Children are sorted by name (NOCASE). Root nodes have <c>ParentId == null</c>.</summary>
+    public IReadOnlyList<CollectionNode> CollectionTree()
+    {
+        // 1) Load all rows: id, name, parent_id, direct count.
+        var all = new Dictionary<long, CollectionNode>();
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.CommandText = @"SELECT c.id, c.name, c.parent_id,
+                                  (SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id=c.id)
+                                FROM collections c ORDER BY c.name COLLATE NOCASE;";
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read())
+            {
+                var n = new CollectionNode
+                {
+                    Id = rd.GetInt64(0),
+                    Name = rd.GetString(1),
+                    ParentId = rd.IsDBNull(2) ? null : rd.GetInt64(2),
+                    Count = rd.GetInt32(3),
+                };
+                all[n.Id] = n;
+            }
+        }
+
+        // 2) Wire up parent→children relationships; collect root nodes.
+        var roots = new List<CollectionNode>();
+        foreach (var n in all.Values)
+        {
+            if (n.ParentId is long pid && all.TryGetValue(pid, out var parent))
+                parent.Children.Add(n);
+            else
+                roots.Add(n);
+        }
+
+        // 3) Sort children by name and roll up recursive counts (mirrors FolderTree.RollUp).
+        int RollUp(CollectionNode n)
+        {
+            n.Children.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+            int total = n.Count;
+            foreach (var c in n.Children) total += RollUp(c);
+            n.CountRecursive = total;
+            return total;
+        }
+        roots.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+        foreach (var r in roots) RollUp(r);
+        return roots;
+    }
+
+    /// <summary>Return the id of the given collection plus all its descendants (depth-first).
+    /// Used by <see cref="BuildFromWhere"/> when <c>includeSubcollections</c> is true (T41).</summary>
+    public IReadOnlyList<long> CollectionAndDescendantIds(long id)
+    {
+        var result = new List<long>();
+        var stack = new Stack<long>();
+        stack.Push(id);
+        while (stack.Count > 0)
+        {
+            var cur = stack.Pop();
+            result.Add(cur);
+            using var cmd = _con.CreateCommand();
+            cmd.CommandText = "SELECT id FROM collections WHERE parent_id=$pid;";
+            cmd.Parameters.AddWithValue("$pid", cur);
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read()) stack.Push(rd.GetInt64(0));
+        }
+        return result;
+    }
+
+    /// <summary>Create a collection. Returns its id, or -1 if the name already exists (UNIQUE NOCASE).
+    /// Pass <paramref name="parentId"/> to create a sub-collection (T41/F29); validates the parent exists.</summary>
+    public long CreateCollection(string name, long? parentId = null)
     {
         try
         {
             using var cmd = _con.CreateCommand();
-            cmd.CommandText = "INSERT INTO collections(name) VALUES($n); SELECT last_insert_rowid();";
-            cmd.Parameters.AddWithValue("$n", (name ?? "").Trim());
+            if (parentId is long pid)
+            {
+                // Validate parent exists to give a clear failure rather than a FK-less silent null.
+                var exists = Convert.ToInt64(Scalar("SELECT COUNT(*) FROM collections WHERE id=$id;", ("$id", pid)) ?? 0L) > 0;
+                if (!exists) return -2;   // -2 = parent not found
+                cmd.CommandText = "INSERT INTO collections(name,parent_id) VALUES($n,$p); SELECT last_insert_rowid();";
+                cmd.Parameters.AddWithValue("$n", (name ?? "").Trim());
+                cmd.Parameters.AddWithValue("$p", pid);
+            }
+            else
+            {
+                cmd.CommandText = "INSERT INTO collections(name) VALUES($n); SELECT last_insert_rowid();";
+                cmd.Parameters.AddWithValue("$n", (name ?? "").Trim());
+            }
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
         catch (SqliteException) { return -1; }   // UNIQUE(name COLLATE NOCASE) violation
@@ -966,8 +1096,43 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
         catch (SqliteException) { return false; }
     }
 
-    /// <summary>Delete a collection; collection_items rows cascade away.</summary>
-    public void DeleteCollection(long id) => Exec("DELETE FROM collections WHERE id=$id;", ("$id", id));
+    /// <summary>Delete a collection. Children (sub-collections) are PROMOTED — re-parented to this
+    /// collection's parent (or made roots if it was a root) — before the delete, all in one transaction.
+    /// collection_items rows cascade away via the FK. Honors R28: no ON DELETE CASCADE on parent_id.</summary>
+    public void DeleteCollection(long id)
+    {
+        using var tx = _con.BeginTransaction();
+        // Find the grandparent (may be null → promoting children makes them roots).
+        long? grandparent = null;
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "SELECT parent_id FROM collections WHERE id=$id;";
+            cmd.Parameters.AddWithValue("$id", id);
+            using var rd = cmd.ExecuteReader();
+            if (rd.Read() && !rd.IsDBNull(0)) grandparent = rd.GetInt64(0);
+        }
+        // Re-parent direct children to grandparent (null = root).
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = grandparent is long gp
+                ? "UPDATE collections SET parent_id=$gp WHERE parent_id=$id;"
+                : "UPDATE collections SET parent_id=NULL WHERE parent_id=$id;";
+            if (grandparent is long gp2) cmd.Parameters.AddWithValue("$gp", gp2);
+            cmd.Parameters.AddWithValue("$id", id);
+            cmd.ExecuteNonQuery();
+        }
+        // Delete the collection (collection_items cascade away via their FK).
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "DELETE FROM collections WHERE id=$id;";
+            cmd.Parameters.AddWithValue("$id", id);
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
 
     /// <summary>Add images to a collection (idempotent — INSERT OR IGNORE on the PK).</summary>
     public void AddToCollection(long collectionId, IEnumerable<long> imageIds) =>
@@ -988,6 +1153,33 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
             foreach (var id in imageIds) { pI.Value = id; cmd.ExecuteNonQuery(); }
         }
         tx.Commit();
+    }
+
+    /// <summary>T44/F31 — bulk fetch collection memberships for a set of image ids. Returns a map of
+    /// image_id → list of collection_ids. Images with no memberships are absent from the map (not
+    /// present with an empty list). Batches in chunks of 500 to stay under SQLite's variable limit.</summary>
+    public Dictionary<long, List<long>> GetCollectionMemberships(IReadOnlyList<long> imageIds)
+    {
+        var result = new Dictionary<long, List<long>>();
+        if (imageIds.Count == 0) return result;
+        const int chunkSize = 500;
+        for (int offset = 0; offset < imageIds.Count; offset += chunkSize)
+        {
+            var chunk = imageIds.Skip(offset).Take(chunkSize).ToList();
+            var paramNames = Enumerable.Range(0, chunk.Count).Select(i => $"$im{i}").ToList();
+            using var cmd = _con.CreateCommand();
+            cmd.CommandText = $"SELECT image_id, collection_id FROM collection_items WHERE image_id IN ({string.Join(",", paramNames)});";
+            for (int i = 0; i < chunk.Count; i++) cmd.Parameters.AddWithValue(paramNames[i], chunk[i]);
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read())
+            {
+                var imgId = rd.GetInt64(0);
+                var colId = rd.GetInt64(1);
+                if (!result.TryGetValue(imgId, out var lst)) result[imgId] = lst = new List<long>();
+                lst.Add(colId);
+            }
+        }
+        return result;
     }
 
     /// <summary>T27 Auto-Tag (suggest-only KNN): find non-archived images within Hamming maxDistance

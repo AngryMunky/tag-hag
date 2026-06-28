@@ -15,6 +15,13 @@ public sealed class AppSettings
     public List<string> SourceRoots { get; set; } = new();
     public string? ExportDir { get; set; }
 
+    /// <summary>T37: User-configured managed store directory. Null = beside-exe default ("library-store").</summary>
+    public string? StoreDir { get; set; }
+    /// <summary>T37: Old store paths left behind by "Only new images" relocation — kept scanned so legacy files stay indexed.</summary>
+    public List<string> LegacyStoreRoots { get; set; } = new();
+    /// <summary>T37/T39: Default consolidation mode. Downsample resamples+recycles; MoveOnly relocates full-res.</summary>
+    public OptimizeMode DefaultMode { get; set; } = OptimizeMode.Downsample;
+
     /// <summary>Default max longest-edge for downsample/optimize (T14).</summary>
     public int MaxDim { get; set; } = 1024;
 

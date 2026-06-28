@@ -197,6 +197,9 @@
   /* T35/F25 — drag images onto a folder */
   .folrow.drop{background:rgba(164,255,106,.18);box-shadow:inset 0 0 0 1.5px var(--acid);color:#ece5d6}
   .folrow.drop .cnt,.folrow.drop .ico{color:var(--acid)}
+  /* T43/F30 — drag images into a collection row (logical add, no file move) */
+  .colrow.drop{background:rgba(164,255,106,.18);box-shadow:inset 0 0 0 1.5px var(--acid);color:#ece5d6}
+  .colrow.drop .cnt,.colrow.drop .ico{color:var(--acid)}
   .dragghost{position:absolute;top:-1000px;left:-1000px;z-index:9999;pointer-events:none;padding:6px 12px;border-radius:999px;
     background:var(--acid);color:#141018;font:600 12.5px Inter,system-ui,sans-serif;box-shadow:0 6px 18px rgba(0,0,0,.5);white-space:nowrap}
   /* T36/F26 — import/scan progress overlay (covers only #gridwrap → sidebar + top bar stay usable) */
@@ -210,7 +213,7 @@
   #scanoverlay .scanpct{font:600 12px Inter,system-ui,sans-serif;color:var(--acid);margin-top:8px;min-height:15px}
   #scanoverlay .scanbtn{margin-top:16px;padding:7px 18px;border:1px solid #4a4356;border-radius:999px;background:#2b2a33;color:#d8d0bf;font:600 12px Inter,system-ui,sans-serif;cursor:pointer}
   #scanoverlay .scanbtn:hover{background:#3a3344;color:#ece5d6}
-  #folsub.on{color:var(--acid);background:rgba(164,255,106,.10)}
+  #folsub.on,#colsub.on{color:var(--acid);background:rgba(164,255,106,.10)}
   #colpick,#movepick,#moremenu{position:absolute;bottom:66px;left:50%;transform:translateX(-50%);min-width:240px;max-height:300px;overflow:auto;
     background:rgba(24,18,32,.98);backdrop-filter:blur(14px);border:1px solid #362a4c;border-radius:11px;
     box-shadow:0 16px 44px rgba(0,0,0,.6);z-index:13;display:none;padding:5px 0}
@@ -289,10 +292,10 @@
     </nav>
 
     <div class="navhead" style="display:flex;align-items:center;justify-content:space-between">
-      <span>Collections</span><span class="colnewbtn" id="colnew" title="New collection">＋ New</span>
+      <span>Collections</span><span style="display:flex;gap:2px"><span class="colnewbtn" id="colnew" title="New top-level collection">＋ New</span><span class="colnewbtn" id="colsub" title="Include images from sub-collections when a collection is selected">⊞ Sub-collections</span></span>
     </div>
     <nav id="colnav"></nav>
-    <div class="v2note" id="colempty">No collections yet — ＋ New to make one.</div>
+    <div class="v2note" id="colempty">No collections yet — create one with ＋ New, then drag images in.</div>
 
     <div class="navhead" style="display:flex;align-items:center;justify-content:space-between">
       <span>Folders</span><span style="display:flex;gap:2px"><span class="colnewbtn" id="folnew" title="New folder (under the selected folder, or a source root)">＋</span><span class="colnewbtn" id="folsub" title="Include images from subfolders when a folder is selected">⊞ Subfolders</span></span>
@@ -475,9 +478,11 @@
   let scope='all';                              // all | unsorted | bog | favorites | col | folder
   let currentCid=null;                          // active collection id when scope==='col' (T28)
   let currentFolderPath=null, currentFolderRoot=null, folderSubtree=false;  // active folder node + subtree toggle (T33/F24)
+  let collSubtree=false;                             // include sub-collections toggle (T42/F29)
   let acItems=[],acSel=-1;
   let tagAcItems=[],tagAcSel=-1;                 // separate AC state for the TAGS add-input (T26)
-  let colsCache=[];                              // last {id,name,count}[] from a cols reply (T28)
+  let colsCache=[];                              // flat {id,name,count,depth}[] derived from tree (T28/T41)
+  let colsTree=[];                               // nested CollectionNode tree from the cols reply (T41)
   let loaded=[], cur=-1, curMeta=null, panelIdx=-1, panelMeta=null, tab='info';
   let sel=new Set(), lastIdx=-1;
   let dupeMode=false, nearDupes=false;
@@ -486,7 +491,7 @@
   function post(m){ if(window.chrome&&window.chrome.webview) window.chrome.webview.postMessage(JSON.stringify(m)); }
   function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
   function flags(){ if(scope==='unsorted')return{untaggedOnly:true}; if(scope==='bog')return{archivedOnly:true};
-    if(scope==='favorites')return{favoritesOnly:true}; if(scope==='optimized')return{optimizedOnly:true}; if(scope==='col')return{collectionId:currentCid};
+    if(scope==='favorites')return{favoritesOnly:true}; if(scope==='optimized')return{optimizedOnly:true}; if(scope==='col')return{collectionId:currentCid,includeSubcollections:collSubtree};
     if(scope==='folder')return{folderPath:currentFolderPath, folderRoot:currentFolderRoot, includeSubfolders:folderSubtree}; return {}; }
   function resetGrid(){ gen++; loading=false; grid.innerHTML=''; loaded=[]; page=0; total=0; exhausted=false; clearSel(); emptyMsg.style.display='none'; panelIdx=-1; showPanelEmpty(); }
   function requestPage(){ if(loading||exhausted)return; loading=true; post({type:'query',raw,page,size:SIZE,gen,...flags()}); }
@@ -603,7 +608,8 @@
     else { const e=document.createElement('div'); e.className='pickrow'; e.style.cssText='opacity:.5;cursor:default'; e.innerHTML='<span class="nm">No folders yet — Scan first</span>'; mp.appendChild(e); }
     if(colsCache.length){ const ch=document.createElement('div'); ch.className='pickhead sep2'; ch.textContent='Add to collection'; mp.appendChild(ch);
       colsCache.forEach(c=>{ const d=document.createElement('div'); d.className='pickrow';
-        d.innerHTML='<span class="nm"><span style="color:#a98fd6">▤</span>'+esc(c.name)+'</span><span class="ct">'+c.count+'</span>';
+        const pfx=' '.repeat(c.depth||0);
+        d.innerHTML='<span class="nm"><span style="color:#a98fd6">▤</span>'+pfx+esc(c.name)+'</span><span class="ct">'+c.count+'</span>';
         d.onclick=()=>{ post({type:'moveto',targetKind:'collection',ids,collectionId:c.id}); hideMovePick(); }; mp.appendChild(d); }); }
     mp.style.display='block'; }
   function hideMovePick(){ $('#movepick').style.display='none'; }
@@ -636,7 +642,7 @@
     dragGhost.textContent='⤳ '+n+' image'+(n===1?'':'s'); document.body.appendChild(dragGhost);
     try{ e.dataTransfer.setDragImage(dragGhost,14,14); }catch(_){}
   }
-  function cardDragEnd(){ dragIds=[]; clearDropHi(); setDragScroll(0); if(dragGhost){ dragGhost.remove(); dragGhost=null; } }
+  function cardDragEnd(){ dragIds=[]; clearDropHi(); clearColDropHi(); setDragScroll(0); if(dragGhost){ dragGhost.remove(); dragGhost=null; } }
   function clearDropHi(){ folnavEl.querySelectorAll('.folrow.drop').forEach(r=>r.classList.remove('drop')); }
   function dragAutoScroll(){ if(dragScrollDir!==0 && sidebarEl){ sidebarEl.scrollTop+=dragScrollDir*12; dragScrollRAF=requestAnimationFrame(dragAutoScroll); } else { dragScrollRAF=null; } }
   function setDragScroll(dir){ dragScrollDir=dir; if(dir!==0 && !dragScrollRAF) dragScrollRAF=requestAnimationFrame(dragAutoScroll); }
@@ -657,6 +663,32 @@
     e.preventDefault();
     const ids=dragIds.slice(); dragIds=[];
     post({type:'moveto',targetKind:'folder',ids,root:row.dataset.froot,path:row.dataset.fpath});   // same contract as the picker (:571)
+  });
+
+  // ---- T43/F30 drag images into a Collections-sidebar row (logical add via coladd) ----
+  // Reuses dragIds/sidebarEl/setDragScroll from the T35 block. Posts coladd (add only, INSERT OR IGNORE — no file move).
+  // Separate from the #folnav listeners above which post moveto (disk move).
+  const colnavEl=$('#colnav');
+  function clearColDropHi(){ colnavEl.querySelectorAll('.colrow.drop').forEach(r=>r.classList.remove('drop')); }
+  colnavEl.addEventListener('dragover',e=>{
+    if(!dragIds.length) return;
+    const row=e.target.closest('.colrow');
+    if(!row){ clearColDropHi(); setDragScroll(0); return; }
+    e.preventDefault(); try{ e.dataTransfer.dropEffect='copy'; }catch(_){}
+    if(!row.classList.contains('drop')){ clearColDropHi(); row.classList.add('drop'); }
+    if(sidebarEl){ const r=sidebarEl.getBoundingClientRect(), EDGE=46;
+      setDragScroll(e.clientY<r.top+EDGE?-1:(e.clientY>r.bottom-EDGE?1:0)); }
+  });
+  colnavEl.addEventListener('dragleave',e=>{ if(!e.relatedTarget||!colnavEl.contains(e.relatedTarget)){ clearColDropHi(); setDragScroll(0); } });
+  colnavEl.addEventListener('drop',e=>{
+    if(!dragIds.length) return;
+    const row=e.target.closest('.colrow'); clearColDropHi(); setDragScroll(0);
+    if(!row) return;
+    e.preventDefault();
+    const ids=dragIds.slice(); dragIds=[];
+    const cname=(colsCache.find(c=>c.id===Number(row.dataset.cid)))||{name:'collection'};
+    countEl.textContent='Added '+ids.length+' → '+cname.name;
+    post({type:'coladd',collectionId:Number(row.dataset.cid),ids});   // same contract as openColPicker (:850)
   });
 
   // ---- right-click menu ----
@@ -794,37 +826,56 @@
   function applyTagAc(i){ if(i>=0&&i<tagAcItems.length) commitTag(tagAcItems[i].token); }
   function hideTagAc(){ tagAc.style.display='none'; tagAcItems=[]; tagAcSel=-1; }
 
-  // ---- collections sidebar + action-bar picker ----
+  // ---- collections sidebar + action-bar picker (T28/T41/T42) ----
   const colpick=$('#colpick');
-  function renderColNav(items){ colsCache=items||[]; const nav=$('#colnav'); nav.innerHTML='';
+  function flattenCols(nodes,depth){ const out=[];
+    (nodes||[]).forEach(n=>{ out.push({id:n.id,name:n.name,count:n.count,countRecursive:n.countRecursive,depth:depth||0});
+      if(n.children&&n.children.length) out.push(...flattenCols(n.children,depth+1)); }); return out; }
+  function renderColNav(tree){ colsTree=tree||[]; colsCache=flattenCols(colsTree,0);
+    const nav=$('#colnav'); nav.innerHTML='';
     $('#colempty').style.display=colsCache.length?'none':'block';
     // active collection deleted out from under us → fall back to All
     if(scope==='col' && !colsCache.some(c=>c.id===currentCid)){ scope='all'; currentCid=null;
       document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.toggle('on',r.dataset.scope==='all'));
       $('#viewtitle').textContent='All Images'; refresh(); }
-    colsCache.forEach(c=>{ const row=document.createElement('div');
-      row.className='navrow colrow'+(scope==='col'&&c.id===currentCid?' on':''); row.dataset.cid=c.id;
-      row.innerHTML='<span class="l"><span class="ico" style="color:#a98fd6">▤</span>'+esc(c.name)+'</span>';
+    const walk=(nodes,depth)=>{ (nodes||[]).forEach(n=>{
+      const row=document.createElement('div');
+      row.className='navrow colrow'+(scope==='col'&&n.id===currentCid?' on':''); row.dataset.cid=n.id;
+      const label=document.createElement('span'); label.className='l'; label.style.paddingLeft=(depth*12)+'px';
+      const ico=document.createElement('span'); ico.className='ico'; ico.style.color='#a98fd6'; ico.textContent='▤';
+      label.appendChild(ico); label.appendChild(document.createTextNode(n.name));
+      row.appendChild(label);
       const right=document.createElement('span'); right.style.cssText='display:flex;align-items:center;gap:4px';
       const act=document.createElement('span'); act.className='act';
+      const sub=document.createElement('span'); sub.textContent='＋'; sub.title='New sub-collection';
+      sub.onclick=(e)=>{ e.stopPropagation(); const nm=(prompt('New sub-collection under “'+n.name+'”:','')||'').trim(); if(nm) post({type:'colcreate',name:nm,parentId:n.id}); };
       const ed=document.createElement('span'); ed.textContent='✎'; ed.title='Rename';
-      ed.onclick=(e)=>{ e.stopPropagation(); const n=(prompt('Rename collection:',c.name)||'').trim(); if(n&&n!==c.name) post({type:'colrename',id:c.id,name:n}); };
+      ed.onclick=(e)=>{ e.stopPropagation(); const nm=(prompt('Rename collection:',n.name)||'').trim(); if(nm&&nm!==n.name) post({type:'colrename',id:n.id,name:nm}); };
       const del=document.createElement('span'); del.textContent='🗑'; del.title='Delete';
-      del.onclick=(e)=>{ e.stopPropagation(); if(confirm('Delete collection “'+c.name+'”? (the images are not deleted)')) post({type:'coldelete',id:c.id}); };
-      act.appendChild(ed); act.appendChild(del);
-      const cnt=document.createElement('span'); cnt.className='cnt'; cnt.textContent=c.count;
+      del.onclick=(e)=>{ e.stopPropagation();
+        const sc=n.children?n.children.length:0;
+        const msg=sc>0?'Delete “'+n.name+'”? Its '+sc+' sub-collection'+(sc===1?'':'s')+' move up; images stay in the library.'
+          :'Delete “'+n.name+'”? Images stay in the library.';
+        if(confirm(msg)) post({type:'coldelete',id:n.id}); };
+      act.appendChild(sub); act.appendChild(ed); act.appendChild(del);
+      const cnt=document.createElement('span'); cnt.className='cnt';
+      cnt.textContent=collSubtree?n.countRecursive:n.count;
       right.appendChild(act); right.appendChild(cnt); row.appendChild(right);
-      row.onclick=()=>{ scope='col'; currentCid=c.id; currentFolderPath=null; currentFolderRoot=null; dupeMode=false; $('#dupctl').style.display='none'; $('#cnt-dupes').textContent='';
+      row.onclick=()=>{ scope='col'; currentCid=n.id; currentFolderPath=null; currentFolderRoot=null; dupeMode=false; $('#dupctl').style.display='none'; $('#cnt-dupes').textContent='';
         document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.remove('on'));
         document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.toggle('on',r===row));
         document.querySelectorAll('#folnav .navrow').forEach(r=>r.classList.remove('on'));
-        $('#viewtitle').textContent=c.name; refresh(); };
-      nav.appendChild(row); });
+        $('#viewtitle').textContent=n.name; refresh(); };
+      nav.appendChild(row);
+      if(n.children&&n.children.length) walk(n.children,depth+1);
+    }); };
+    walk(colsTree,0);
     if(sel.size) updateBar();   // the Add-to-collection pill depends on colsCache being non-empty
   }
   function openColPicker(){ if(!sel.size||!colsCache.length){ hideColPick(); return; } hideMovePick(); hideMoreMenu();
     colpick.innerHTML=''; colsCache.forEach(c=>{ const d=document.createElement('div');
-      d.innerHTML='<span>'+esc(c.name)+'</span><span class="df" style="color:var(--mut2)">'+c.count+'</span>';
+      const pfx=' '.repeat(c.depth||0);
+      d.innerHTML='<span>'+pfx+esc(c.name)+'</span><span class=”df” style=”color:var(--mut2)”>'+c.count+'</span>';
       d.onclick=()=>{ post({type:'coladd',collectionId:c.id,ids:[...sel]}); hideColPick(); }; colpick.appendChild(d); });
     const nw=document.createElement('div'); nw.className='new'; nw.textContent='＋ New collection…';
     nw.onclick=()=>{ const n=(prompt('New collection name:')||'').trim(); if(n) post({type:'colcreate',name:n}); hideColPick(); }; colpick.appendChild(nw);
@@ -877,6 +928,7 @@
     if(sb) sb.scrollTop=sp;   // preserve sidebar scroll across the rebuild — a scan/rename reload shouldn't jump the list
   }
   $('#folsub').onclick=()=>{ folderSubtree=!folderSubtree; $('#folsub').classList.toggle('on',folderSubtree); if(scope==='folder') refresh(); };
+  $('#colsub').onclick=()=>{ collSubtree=!collSubtree; $('#colsub').classList.toggle('on',collSubtree); renderColNav(colsTree); if(scope==='col') refresh(); };
 
   // ---- auto-tag (T27): suggest-only, gen-guarded modal ----
   let atGen=0, atTargetId=null; const atModal=$('#autotag-modal');
@@ -950,7 +1002,7 @@
       $('#cnt-favorites').textContent=(m.favorites||0)>0?(m.favorites).toLocaleString():'';
       $('#cnt-optimized').textContent=(m.optimized||0)>0?(m.optimized).toLocaleString():''; }   // shown only when >0
     else if(m.type==='tags'){ if(panelMeta&&panelMeta.id===m.id){ panelMeta.promptTags=m.prompt; panelMeta.userTags=m.user; renderTags(panelMeta); } }
-    else if(m.type==='cols'){ renderColNav(m.items||[]); }
+    else if(m.type==='cols'){ renderColNav(m.tree||[]); }
     else if(m.type==='folders'){ renderFolNav(m.tree||[]); }
     else if(m.type==='autotag'){ if(m.gen!==undefined && m.gen!==atGen) return; renderAutotag(m); }   // drop a superseded run
     else if(m.type==='dupes'){ if(m.gen!==undefined && m.gen!==gen) return;   // drop a superseded dupes scan

@@ -1,10 +1,10 @@
 namespace TheTagHag;
 
 /// <summary>
-/// T16 — Settings dialog. Manage source folders (add/remove), the export folder, the default
-/// downsample size, and the Civitai API key (masked; persisted DPAPI-encrypted via AppSettings).
-/// Code-built to match the app's Dark Magic Pro styling. MainForm reads the result properties on OK
-/// and prunes the library for any source folder that was removed.
+/// T16 — Settings dialog. Manage source folders (add/remove), the export folder, the Civitai API key
+/// (masked; persisted DPAPI-encrypted via AppSettings). T37 adds a Library section: configurable store
+/// location, default consolidation mode (T39), and max downsample size. Code-built to match the app's
+/// Dark Magic Pro styling. MainForm reads the result properties on OK.
 /// </summary>
 public sealed class SettingsForm : Form
 {
@@ -17,11 +17,16 @@ public sealed class SettingsForm : Form
 
     private readonly ListBox _roots = new();
     private readonly TextBox _export = new();
+    private readonly TextBox _storeDir = new();
+    private readonly RadioButton _modeDownsample = new();
+    private readonly RadioButton _modeMoveOnly = new();
     private readonly NumericUpDown _maxDim = new();
     private readonly TextBox _apiKey = new();
 
     public List<string> SourceRoots => _roots.Items.Cast<string>().ToList();
     public string? ExportDir => string.IsNullOrWhiteSpace(_export.Text) ? null : _export.Text.Trim();
+    public string? StoreDir => string.IsNullOrWhiteSpace(_storeDir.Text) ? null : _storeDir.Text.Trim();
+    public OptimizeMode DefaultMode => _modeMoveOnly.Checked ? OptimizeMode.MoveOnly : OptimizeMode.Downsample;
     public int MaxDim => (int)_maxDim.Value;
     public string ApiKey => _apiKey.Text;
 
@@ -32,12 +37,13 @@ public sealed class SettingsForm : Form
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false; MaximizeBox = false; ShowInTaskbar = false;
-        ClientSize = new Size(520, 398);
+        ClientSize = new Size(520, 494);
         BackColor = Bg; ForeColor = Bone;
         Font = new Font("Segoe UI", 9f);
 
         var title = new Label { Text = "Settings", ForeColor = Acid, AutoSize = true, Location = new Point(16, 12), Font = new Font("Segoe UI", 11f, FontStyle.Bold) };
 
+        // Source folders
         var rootsLabel = new Label { Text = "Source folders (scanned recursively):", AutoSize = true, Location = new Point(16, 46) };
         _roots.Location = new Point(16, 68); _roots.Size = new Size(376, 112);
         _roots.BackColor = Panel; _roots.ForeColor = Bone; _roots.BorderStyle = BorderStyle.FixedSingle;
@@ -55,38 +61,72 @@ public sealed class SettingsForm : Form
         var removeBtn = MakeBtn("Remove", new Point(400, 102));
         removeBtn.Click += (_, _) => { if (_roots.SelectedIndex >= 0) _roots.Items.RemoveAt(_roots.SelectedIndex); };
 
+        // Export folder
         var exportLabel = new Label { Text = "Export folder (copies / archives go here):", AutoSize = true, Location = new Point(16, 190) };
         _export.Location = new Point(16, 212); _export.Size = new Size(376, 24);
         _export.ReadOnly = true; _export.BackColor = Panel; _export.ForeColor = Bone; _export.BorderStyle = BorderStyle.FixedSingle;
         _export.Text = s.ExportDir ?? "";
-        var browseBtn = MakeBtn("Browse…", new Point(400, 211));
-        browseBtn.Click += (_, _) =>
+        var browseExportBtn = MakeBtn("Browse…", new Point(400, 211));
+        browseExportBtn.Click += (_, _) =>
         {
             using var dlg = new FolderBrowserDialog { Description = "Choose the export folder" };
             if (!string.IsNullOrEmpty(_export.Text) && Directory.Exists(_export.Text)) dlg.SelectedPath = _export.Text;
             if (dlg.ShowDialog(this) == DialogResult.OK) _export.Text = dlg.SelectedPath;
         };
 
-        var dimLabel = new Label { Text = "Default downsample size (max px):", AutoSize = true, Location = new Point(16, 250) };
+        // Library section (T37)
+        var libraryHeader = new Label { Text = "Library", ForeColor = Acid, AutoSize = true, Location = new Point(16, 250), Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
+        var storeDirLabel = new Label { Text = "Store location:", AutoSize = true, Location = new Point(16, 270) };
+        _storeDir.Location = new Point(16, 288); _storeDir.Size = new Size(376, 24);
+        _storeDir.ReadOnly = true; _storeDir.BackColor = Panel; _storeDir.ForeColor = Bone; _storeDir.BorderStyle = BorderStyle.FixedSingle;
+        _storeDir.Text = s.StoreDir ?? "";
+        var browseStoreBtn = MakeBtn("Browse…", new Point(400, 287));
+        browseStoreBtn.Click += (_, _) =>
+        {
+            using var dlg = new FolderBrowserDialog { Description = "Choose the library store folder" };
+            if (!string.IsNullOrEmpty(_storeDir.Text) && Directory.Exists(_storeDir.Text)) dlg.SelectedPath = _storeDir.Text;
+            if (dlg.ShowDialog(this) == DialogResult.OK) _storeDir.Text = dlg.SelectedPath;
+        };
+        var clearStoreBtn = MakeBtn("Clear (default)", new Point(400, 319));
+        clearStoreBtn.Width = 112;
+        clearStoreBtn.Click += (_, _) => _storeDir.Text = "";
+
+        var modeLabel = new Label { Text = "Default mode:", AutoSize = true, Location = new Point(16, 323) };
+        _modeDownsample.Text = "Downsample"; _modeDownsample.AutoSize = true; _modeDownsample.ForeColor = Bone; _modeDownsample.BackColor = Bg;
+        _modeDownsample.Location = new Point(120, 321);
+        _modeMoveOnly.Text = "Move only"; _modeMoveOnly.AutoSize = true; _modeMoveOnly.ForeColor = Bone; _modeMoveOnly.BackColor = Bg;
+        _modeMoveOnly.Location = new Point(228, 321);
+        _modeDownsample.Checked = s.DefaultMode == OptimizeMode.Downsample;
+        _modeMoveOnly.Checked = s.DefaultMode == OptimizeMode.MoveOnly;
+
+        var dimLabel = new Label { Text = "Max longest edge (px):", AutoSize = true, Location = new Point(16, 349) };
         _maxDim.Minimum = 256; _maxDim.Maximum = 8192; _maxDim.Increment = 128;
         _maxDim.Value = Math.Clamp(s.MaxDim, 256, 8192);
-        _maxDim.Location = new Point(232, 247); _maxDim.Width = 90;
+        _maxDim.Location = new Point(232, 346); _maxDim.Width = 90;
         _maxDim.BackColor = Panel; _maxDim.ForeColor = Bone; _maxDim.BorderStyle = BorderStyle.FixedSingle;
 
-        var keyLabel = new Label { Text = "Civitai API key (for harvest mode):", AutoSize = true, Location = new Point(16, 286) };
-        _apiKey.Location = new Point(16, 308); _apiKey.Size = new Size(376, 24);
+        // Civitai API key
+        var keyLabel = new Label { Text = "Civitai API key (for harvest mode):", AutoSize = true, Location = new Point(16, 382) };
+        _apiKey.Location = new Point(16, 404); _apiKey.Size = new Size(376, 24);
         _apiKey.UseSystemPasswordChar = true; _apiKey.BackColor = Panel; _apiKey.ForeColor = Bone; _apiKey.BorderStyle = BorderStyle.FixedSingle;
         _apiKey.Text = s.ApiKey;
-        var showKey = new CheckBox { Text = "Show", AutoSize = true, ForeColor = Mut, Location = new Point(400, 310) };
+        var showKey = new CheckBox { Text = "Show", AutoSize = true, ForeColor = Mut, Location = new Point(400, 406) };
         showKey.CheckedChanged += (_, _) => _apiKey.UseSystemPasswordChar = !showKey.Checked;
 
-        var save = new Button { Text = "Save", DialogResult = DialogResult.OK, Location = new Point(328, 358), Width = 84, FlatStyle = FlatStyle.Flat, ForeColor = Bg, BackColor = Acid };
+        var save = new Button { Text = "Save", DialogResult = DialogResult.OK, Location = new Point(328, 454), Width = 84, FlatStyle = FlatStyle.Flat, ForeColor = Bg, BackColor = Acid };
         save.FlatAppearance.BorderSize = 0;
-        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(420, 358), Width = 84, FlatStyle = FlatStyle.Flat, ForeColor = Bone, BackColor = Panel };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(420, 454), Width = 84, FlatStyle = FlatStyle.Flat, ForeColor = Bone, BackColor = Panel };
         cancel.FlatAppearance.BorderColor = Border;
 
         AcceptButton = save; CancelButton = cancel;
-        Controls.AddRange(new Control[] { title, rootsLabel, _roots, addBtn, removeBtn, exportLabel, _export, browseBtn, dimLabel, _maxDim, keyLabel, _apiKey, showKey, save, cancel });
+        Controls.AddRange(new Control[] {
+            title, rootsLabel, _roots, addBtn, removeBtn,
+            exportLabel, _export, browseExportBtn,
+            libraryHeader, storeDirLabel, _storeDir, browseStoreBtn, clearStoreBtn,
+            modeLabel, _modeDownsample, _modeMoveOnly,
+            dimLabel, _maxDim,
+            keyLabel, _apiKey, showKey,
+            save, cancel });
     }
 
     private static Button MakeBtn(string text, Point at)

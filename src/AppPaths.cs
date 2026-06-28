@@ -34,11 +34,17 @@ public static class AppPaths
     /// <summary>Thumbnail cache (lazy + pre-warmed WebP thumbnails).</summary>
     public static string ThumbsDir => Path.Combine(ExeDir, "thumbs");
 
-    /// <summary>The Tag Hag-managed library store (v2.1, architecture "model shift"). Optimizing an
-    /// image resamples it into here — mirroring its source rel-path under a per-root slug — and
-    /// recycles the original. Portable (beside the exe) and itself a SCANNED managed root, so its
-    /// contents stay indexed. See LibraryDb.MarkOptimized + LocalScanner.</summary>
-    public static string LibraryStoreDir => Path.Combine(ExeDir, "library-store");
+    private static string? _storeDir;
+
+    /// <summary>T37: Inject the user-configured store dir once at startup (from AppSettings.StoreDir).
+    /// Pass null to restore the beside-exe default. Must be called before any use of LibraryStoreDir.</summary>
+    public static void SetStoreDir(string? dir) => _storeDir = dir;
+
+    /// <summary>The Tag Hag-managed library store (v2.1, architecture "model shift"). Returns the
+    /// user-configured dir (T37) when set, else the portable beside-exe default. Optimized images are
+    /// resampled (or moved) into here under a per-root slug. Itself a scanned managed root.
+    /// See LibraryDb.MarkOptimized + LocalScanner.</summary>
+    public static string LibraryStoreDir => _storeDir ?? Path.Combine(ExeDir, "library-store");
 
     /// <summary>Create the managed store directory if absent; returns its path.</summary>
     public static string EnsureLibraryStore()

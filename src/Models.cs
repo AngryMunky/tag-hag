@@ -1,4 +1,4 @@
-namespace TheTagHag;
+﻿namespace TheTagHag;
 
 /// <summary>
 /// One indexed image (camelCase maps to the SQLite `images` table). The internal `Id` is a
@@ -72,6 +72,29 @@ public sealed class FolderNode
     /// <summary>Recursive image count: this folder plus everything beneath it (non-archived).</summary>
     public int Count { get; set; }
     public List<FolderNode> Children { get; set; } = new();
+}
+
+/// <summary>One node in the nested collections tree (T41/F29). <see cref="Count"/> is the direct
+/// membership count; <see cref="CountRecursive"/> is filled by <see cref="LibraryDb.CollectionTree"/>
+/// and includes all descendants (mirrors FolderNode's recursive roll-up). Children are sorted by name.</summary>
+public sealed class CollectionNode
+{
+    public long Id { get; set; }
+    public string Name { get; set; } = "";
+    public long? ParentId { get; set; }
+    public int Count { get; set; }
+    public int CountRecursive { get; set; }
+    public List<CollectionNode> Children { get; set; } = new();
+}
+
+/// <summary>T44/F31 — one image whose collection memberships are tied (two or more collections share the
+/// deepest depth). Passed to <see cref="ReviewTiesForm"/> so the user can pick the correct home.</summary>
+public sealed class TieCandidate
+{
+    public long ImageId { get; set; }
+    public string FileName { get; set; } = "";
+    /// <summary>The tied collections: id + name + depth (all share the max depth for this image).</summary>
+    public List<(long CollId, string Name, int Depth)> Tied { get; set; } = new();
 }
 
 /// <summary>One auto-tag suggestion: a candidate token + how many similar images carry it (T27).</summary>

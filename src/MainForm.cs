@@ -1,4 +1,4 @@
-using System.Reflection;
+﻿using System.Reflection;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -13,7 +13,8 @@ namespace TheTagHag;
 /// </summary>
 public sealed class MainForm : Form
 {
-    private AppSettings _settings = SettingsStore.Load();
+    private readonly bool _isFreshInstall;   // T37: true when no settings file existed before first Load
+    private AppSettings _settings;
     private readonly WebView2 _web = new() { Dock = DockStyle.Fill };
     private readonly ToolStrip _tb = new() { GripStyle = ToolStripGripStyle.Hidden };
     private readonly ToolStripStatusLabel _statusLabel = new("Ready") { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
@@ -29,6 +30,11 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
+        // T37: capture fresh-install flag before Load creates the settings file, then inject store dir.
+        _isFreshInstall = !File.Exists(AppPaths.SettingsFile);
+        _settings = SettingsStore.Load();
+        AppPaths.SetStoreDir(_settings.StoreDir);
+
         Text = $"{AppInfo.Name} v{AppInfo.Version}";
         AppIcon.Apply(this);
         BackColor = Color.FromArgb(0x14, 0x10, 0x18);
@@ -162,6 +168,77 @@ public sealed class MainForm : Form
         SetStatus(_settings.SourceRoots.Count == 0
             ? "No folders indexed yet — add a source folder, then Scan."
             : $"{_db.ImageCount(includeArchived: false):n0} images indexed.");
+
+        // T37: launch validation — if a configured StoreDir is unavailable, warn before any scan.
+        if (!string.IsNullOrEmpty(_settings.StoreDir) && !Directory.Exists(_settings.StoreDir))
+            ShowLaunchValidation();
+
+        // T37: first-run step — shown once on a fresh install (settings file didn't exist before Load).
+        if (_isFreshInstall)
+            ShowFirstRunStep();
+    }
+
+    // T37: warn when the configured store dir is missing/unavailable at startup.
+    private void ShowLaunchValidation()
+    {
+        var pick = MessageBox.Show(this,
+            $"The configured library store location is unavailable:\n  {_settings.StoreDir}\n\n" +
+            "Click OK to pick a new location, or Cancel to use the default (beside the app) for now.",
+            "Library Store Unavailable", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
+        if (pick == DialogResult.OK)
+        {
+            using var fd = new FolderBrowserDialog { Description = "Choose a new library store folder" };
+            if (fd.ShowDialog(this) == DialogResult.OK && !string.IsNullOrEmpty(fd.SelectedPath))
+            {
+                _settings.StoreDir = fd.SelectedPath;
+                AppPaths.SetStoreDir(_settings.StoreDir);
+                SettingsStore.Save(_settings);
+                return;
+            }
+        }
+        // Use default for now; breadcrumb (StoreDir) preserved in settings — not cleared.
+        AppPaths.SetStoreDir(null);
+    }
+
+    // T37: first-run step — skippable "Where should your library live?" dialog (greenfield only).
+    private void ShowFirstRunStep()
+    {
+        using var dlg = new Form
+        {
+            Text = "Welcome to The Tag Hag",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
+            ClientSize = new Size(460, 180),
+            BackColor = Color.FromArgb(0x14, 0x10, 0x18),
+            ForeColor = Color.FromArgb(0xD8, 0xD0, 0xBF),
+            Font = new Font("Segoe UI", 9f),
+        };
+        AppIcon.Apply(dlg);
+
+        dlg.Controls.Add(new Label { Text = "Where should your library live?", ForeColor = Color.FromArgb(0xA4, 0xFF, 0x6A), Font = new Font("Segoe UI", 11f, FontStyle.Bold), AutoSize = true, Location = new Point(16, 14) });
+        dlg.Controls.Add(new Label { Text = "Tag Hag stores optimized and consolidated images in a managed folder.\nThe default is beside the app (portable). You can change this later in Settings.", ForeColor = Color.FromArgb(0x8A, 0x84, 0x95), Size = new Size(428, 40), Location = new Point(16, 48) });
+
+        var chooseBtn = new Button { Text = "Choose a folder…", Location = new Point(16, 132), Width = 130, FlatStyle = FlatStyle.Flat, ForeColor = Color.FromArgb(0xD8, 0xD0, 0xBF), BackColor = Color.FromArgb(0x1B, 0x16, 0x22) };
+        chooseBtn.FlatAppearance.BorderColor = Color.FromArgb(0x5B, 0x3B, 0x8C);
+        chooseBtn.Click += (_, _) =>
+        {
+            using var fd = new FolderBrowserDialog { Description = "Choose the library store folder" };
+            if (fd.ShowDialog(dlg) == DialogResult.OK && !string.IsNullOrEmpty(fd.SelectedPath))
+            {
+                _settings.StoreDir = fd.SelectedPath;
+                AppPaths.SetStoreDir(_settings.StoreDir);
+            }
+            dlg.Close();
+        };
+        var defaultBtn = new Button { Text = "Use default (beside app)", Location = new Point(162, 132), Width = 168, DialogResult = DialogResult.OK, FlatStyle = FlatStyle.Flat, ForeColor = Color.FromArgb(0x14, 0x10, 0x18), BackColor = Color.FromArgb(0xA4, 0xFF, 0x6A) };
+        defaultBtn.FlatAppearance.BorderSize = 0;
+
+        dlg.AcceptButton = defaultBtn;
+        dlg.Controls.Add(chooseBtn); dlg.Controls.Add(defaultBtn);
+        dlg.ShowDialog(this);
+        // Always save — creates the settings file so this dialog never shows again.
+        SettingsStore.Save(_settings);
     }
 
     /// <summary>Every image is addressed by id and served via the full.local interceptor — no
@@ -235,8 +312,13 @@ public sealed class MainForm : Form
             if (type == "colcreate")
             {
                 var name = d.RootElement.TryGetProperty("name", out var nm) ? nm.GetString() ?? "" : "";
-                if (!string.IsNullOrWhiteSpace(name) && _db.CreateCollection(name) < 0)
-                    SetStatus($"A collection named “{name.Trim()}” already exists.");
+                long? parentId = d.RootElement.TryGetProperty("parentId", out var pi) && pi.ValueKind == System.Text.Json.JsonValueKind.Number ? pi.GetInt64() : null;
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    var res = _db.CreateCollection(name, parentId);
+                    if (res == -1) SetStatus($"A collection named \"{name.Trim()}\" already exists.");
+                    else if (res == -2) SetStatus("Parent collection not found.");
+                }
                 PushCols();
                 return;
             }
@@ -246,7 +328,7 @@ public sealed class MainForm : Form
                 {
                     var name = d.RootElement.TryGetProperty("name", out var nm) ? nm.GetString() ?? "" : "";
                     if (!string.IsNullOrWhiteSpace(name) && !_db.RenameCollection(idEl.GetInt64(), name))
-                        SetStatus($"Couldn't rename — “{name.Trim()}” may already exist.");
+                        SetStatus($"Couldn't rename \"{name.Trim()}\" — a collection with that name may already exist.");
                     PushCols();
                 }
                 return;
@@ -283,15 +365,17 @@ public sealed class MainForm : Form
                 }
                 return;
             }
-            // T30 / F20 Library Optimization (the same bridge contract the top-bar dialog drives).
+            // T30 / F20 Library Optimization (the same bridge contract the top-bar dialog drives). T39: mode.
             if (type == "optimizelib")
             {
                 var scope = d.RootElement.TryGetProperty("scope", out var sc) ? sc.GetString() ?? "all" : "all";
                 var maxDim = d.RootElement.TryGetProperty("maxDim", out var md) && md.ValueKind == JsonValueKind.Number ? md.GetInt32() : _settings.MaxDim;
                 var gen = d.RootElement.TryGetProperty("gen", out var gg) && gg.ValueKind == JsonValueKind.Number ? gg.GetInt32() : 0;
+                var mode = d.RootElement.TryGetProperty("mode", out var mv) && mv.GetString() == "MoveOnly"
+                    ? OptimizeMode.MoveOnly : OptimizeMode.Downsample;
                 long[]? oids = d.RootElement.TryGetProperty("ids", out var oa) && oa.ValueKind == JsonValueKind.Array
                     ? oa.EnumerateArray().Select(x => x.GetInt64()).ToArray() : null;
-                _ = HandleOptimizeLibrary(scope, oids, maxDim, gen);
+                _ = HandleOptimizeLibrary(scope, oids, maxDim, mode, gen);
                 return;
             }
             if (type == "optimizecancel") { _optCts?.Cancel(); return; }
@@ -428,7 +512,7 @@ public sealed class MainForm : Form
         }
     }
 
-    // ---------------- settings (T16) ----------------
+    // ---------------- settings (T16 / T37 / T39) ----------------
     private async Task OpenSettings()
     {
         var before = _settings.SourceRoots.ToList();
@@ -438,10 +522,44 @@ public sealed class MainForm : Form
         var removed = before.Where(r => !dlg.SourceRoots.Contains(r, StringComparer.OrdinalIgnoreCase)).ToList();
         var added = dlg.SourceRoots.Where(r => !before.Contains(r, StringComparer.OrdinalIgnoreCase)).ToList();
 
+        // T37: handle store location change (before saving the new values).
+        var oldStore = _settings.StoreDir;
+        var newStore = dlg.StoreDir;
+        bool storeChanged = !string.Equals(oldStore ?? "", newStore ?? "", StringComparison.OrdinalIgnoreCase);
+        if (storeChanged)
+        {
+            var choice = ShowStoreMovePrompt(oldStore, newStore);
+            if (choice == StoreMoveChoice.Cancel) return;
+
+            if (choice == StoreMoveChoice.MoveFiles)
+            {
+                // T38/T44: full relocation not yet implemented (absorbed into T44 Consolidate Library).
+                MessageBox.Show(this,
+                    "File relocation will be available when you run 'Consolidate Library' (coming soon).\n\n" +
+                    "Using 'Only new images' instead — existing optimized files stay in the old location and remain indexed.",
+                    "Relocation Coming Soon", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                choice = StoreMoveChoice.OnlyNew;
+            }
+
+            if (choice == StoreMoveChoice.OnlyNew)
+            {
+                // Push the RESOLVED old store to LegacyStoreRoots so its files stay scanned/served.
+                // oldStore may be null when the user was on the beside-exe default; resolve it via
+                // AppPaths.LibraryStoreDir (which still reflects the old path — SetStoreDir(newStore)
+                // is called below, after this block). BUG-T37T39-02 fix.
+                var resolvedOld = oldStore ?? AppPaths.LibraryStoreDir;
+                if (!_settings.LegacyStoreRoots.Contains(resolvedOld, StringComparer.OrdinalIgnoreCase))
+                    _settings.LegacyStoreRoots.Add(resolvedOld);
+            }
+        }
+
         _settings.SourceRoots = dlg.SourceRoots;
         _settings.ExportDir = dlg.ExportDir;
+        _settings.StoreDir = newStore;       // T37
+        _settings.DefaultMode = dlg.DefaultMode;  // T39
         _settings.MaxDim = dlg.MaxDim;
         _settings.ApiKey = dlg.ApiKey;   // encrypted via DPAPI on assignment
+        AppPaths.SetStoreDir(newStore);   // T37: propagate immediately
         SettingsStore.Save(_settings);
 
         if (removed.Count > 0)
@@ -459,6 +577,41 @@ public sealed class MainForm : Form
             var r = MessageBox.Show(this, $"{added.Count} new folder(s) added. Scan now?", "Scan", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (r == DialogResult.Yes) await DoScan();
         }
+    }
+
+    private enum StoreMoveChoice { MoveFiles, OnlyNew, Cancel }
+
+    private StoreMoveChoice ShowStoreMovePrompt(string? oldStore, string? newStore)
+    {
+        var result = StoreMoveChoice.Cancel;
+        using var dlg = new Form
+        {
+            Text = "Library Location Changed",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
+            ClientSize = new Size(480, 210),
+            BackColor = Color.FromArgb(0x14, 0x10, 0x18),
+            ForeColor = Color.FromArgb(0xD8, 0xD0, 0xBF),
+            Font = new Font("Segoe UI", 9f),
+        };
+        AppIcon.Apply(dlg);
+        dlg.Controls.Add(new Label { Text = "Library Location Changed", ForeColor = Color.FromArgb(0xA4, 0xFF, 0x6A), Font = new Font("Segoe UI", 11f, FontStyle.Bold), AutoSize = true, Location = new Point(16, 12) });
+        dlg.Controls.Add(new Label
+        {
+            Text = $"From: {oldStore ?? "(beside the app)"}\nTo:     {newStore ?? "(beside the app)"}\n\n" +
+                   "What should happen to existing optimized images in the old location?",
+            ForeColor = Color.FromArgb(0xD8, 0xD0, 0xBF), AutoSize = true, Location = new Point(16, 44)
+        });
+
+        Button Btn(string text, int x) { var b = new Button { Text = text, Location = new Point(x, 166), Width = 100, FlatStyle = FlatStyle.Flat, ForeColor = Color.FromArgb(0xD8, 0xD0, 0xBF), BackColor = Color.FromArgb(0x1B, 0x16, 0x22) }; b.FlatAppearance.BorderColor = Color.FromArgb(0x3A, 0x37, 0x44); return b; }
+        var move = Btn("Move them", 16); move.Click += (_, _) => { result = StoreMoveChoice.MoveFiles; dlg.Close(); };
+        var only = Btn("Only new images", 124); only.Width = 130; only.Click += (_, _) => { result = StoreMoveChoice.OnlyNew; dlg.Close(); };
+        var cancel = Btn("Cancel", 370); cancel.Click += (_, _) => { result = StoreMoveChoice.Cancel; dlg.Close(); };
+
+        dlg.Controls.Add(move); dlg.Controls.Add(only); dlg.Controls.Add(cancel);
+        dlg.ShowDialog(this);
+        return result;
     }
 
     private void AddSourceFolder()
@@ -486,6 +639,10 @@ public sealed class MainForm : Form
         var storeRoot = AppPaths.EnsureLibraryStore();
         if (!roots.Contains(storeRoot, StringComparer.OrdinalIgnoreCase)) roots.Add(storeRoot);
         _db.SetLibraryStoreRoot(storeRoot);
+        // T37: also scan any legacy store roots (files left behind by "Only new images" relocation).
+        foreach (var leg in _settings.LegacyStoreRoots)
+            if (!string.IsNullOrWhiteSpace(leg) && Directory.Exists(leg) &&
+                !roots.Contains(leg, StringComparer.OrdinalIgnoreCase)) roots.Add(leg);
         _scanCts?.Dispose();
         _scanCts = new CancellationTokenSource();
         var ct = _scanCts.Token;
@@ -859,22 +1016,51 @@ public sealed class MainForm : Form
 
     // ---------------- Library Optimization (T30 / F20) ----------------
 
-    /// <summary>Top-bar "Optimize Library…": preview the whole-library tally, confirm via the dialog
-    /// (originals go to the Recycle Bin), then run the resample→store→recycle job in the background.</summary>
+    /// <summary>Top-bar "Optimize / Consolidate Library…": preview the whole-library tally (both
+    /// SourceFolders and Collections axes), confirm via the dialog, then run the job in the background.
+    /// T39: mode defaults from Settings; T44: Organize-by radio + tie-resolution + skip-uncollected.</summary>
     private void OpenOptimizeLibrary()
     {
         if (_busy) { SetStatus("Busy — finish the current operation first."); return; }
-        var (count, _, bytes) = _db.OptimizePreview("all", _settings.MaxDim, null);
-        if (count == 0) { SetStatus("Nothing to optimize — every image is already optimized or within the size target."); return; }
-        using var dlg = new OptimizeLibraryForm(count, bytes, _settings.MaxDim);
+
+        // SourceFolders preview (default mode summary line)
+        var sfPrev = _db.OptimizePreview("all", _settings.MaxDim, null, _settings.DefaultMode);
+
+        // Collections-mode eligible ids (includes already-optimized for potential relocation)
+        var tree = _db.CollectionTree();
+        var colEligIds = _db.OptimizeEligibleIds("all", _settings.MaxDim, null, _settings.DefaultMode, OrganizeBy.Collections);
+        var colPrev   = _db.OptimizePreview("all", _settings.MaxDim, null, _settings.DefaultMode, OrganizeBy.Collections);
+
+        if (sfPrev.Count == 0 && colEligIds.Count == 0)
+        { SetStatus("Nothing to optimize — every image is already optimized or within the size target."); return; }
+
+        // Build collection breakdown for the dialog stats line
+        var depthMap   = LibraryOptimizer.BuildDepthMap(tree);
+        var nodeMap    = LibraryOptimizer.BuildNodeMap(tree);
+        var memberMap  = _db.GetCollectionMemberships(colEligIds);
+        int inColl     = memberMap.Count;
+        int uncoll     = colEligIds.Count - inColl;
+        var tieCands   = BuildTieCandidates(colEligIds, memberMap, depthMap, nodeMap);
+
+        int count   = sfPrev.Count > 0 ? sfPrev.Count : colEligIds.Count;
+        long bytes  = sfPrev.Bytes  > 0 ? sfPrev.Bytes  : colPrev.Bytes;
+
+        using var dlg = new OptimizeLibraryForm(count, bytes, _settings.MaxDim, _settings.DefaultMode,
+            OrganizeBy.SourceFolders, inColl, uncoll, tieCands, tree);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
-        _ = HandleOptimizeLibrary("all", null, dlg.MaxDim, ++_optGen);
+        _ = HandleOptimizeLibrary("all", null, dlg.MaxDim, dlg.Mode, ++_optGen,
+            dlg.OrganizeBy, dlg.SkipUncollected, dlg.TieOverrides, tree);
     }
 
-    /// <summary>Background optimize job (HandleDupes template): resample each eligible image into the
-    /// managed store, MarkOptimized (keeps the id + all user-state), recycle the original after the
-    /// store copy is verified, regen the thumbnail. Gen-echoed reply + cancellable.</summary>
-    private async Task HandleOptimizeLibrary(string scope, long[]? ids, int maxDim, int gen)
+    /// <summary>Background optimize job: resample or relocate each eligible image into the managed store,
+    /// MarkOptimized (keeps the id + all user-state), and (Downsample only) recycle the original after
+    /// verification. T39: mode param. T44: organizeBy/skipUncollected/tieOverrides/collectionTree.</summary>
+    private async Task HandleOptimizeLibrary(
+        string scope, long[]? ids, int maxDim, OptimizeMode mode, int gen,
+        OrganizeBy organizeBy = OrganizeBy.SourceFolders,
+        bool skipUncollected = false,
+        IReadOnlyDictionary<long, long>? tieOverrides = null,
+        IReadOnlyList<CollectionNode>? collectionTree = null)
     {
         if (_busy) return;
         if (scope == "selection" && (ids is null || ids.Length == 0)) { SetStatus("No images selected to optimize."); return; }
@@ -882,29 +1068,61 @@ public sealed class MainForm : Form
         _optCts?.Dispose();
         _optCts = new CancellationTokenSource();
         var ct = _optCts.Token;
-        SetStatus("Optimizing library…");
+        bool isConsolidate = organizeBy == OrganizeBy.Collections || mode == OptimizeMode.MoveOnly;
+        var verb = isConsolidate ? "Consolidating" : "Optimizing";
+        SetStatus($"{verb} library…");
         var prog = new Progress<HarvestProgress>(p => SetStatus($"{p.Phase}… {p.Current:n0}/{p.Total:n0}"));
         try
         {
             var res = await Task.Run(() =>
             {
                 using var opDb = new LibraryDb(AppPaths.LibraryDbFile);
-                var eligible = opDb.OptimizeEligibleIds(scope, maxDim, ids);
-                return LibraryOptimizer.Run(opDb, eligible, maxDim, _thumbs, prog, ct);
+                var eligible = opDb.OptimizeEligibleIds(scope, maxDim, ids, mode, organizeBy);
+                return LibraryOptimizer.Run(opDb, eligible, maxDim, mode, organizeBy,
+                    tieOverrides, skipUncollected, collectionTree, _thumbs, prog, ct);
             }, ct);
             _web.CoreWebView2?.PostWebMessageAsString(GalleryBridge.OptDoneReply(gen, res.Optimized, res.Skipped, res.Failed, res.FreedBytes, res.RecycleFailed));
             _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
-            SetStatus($"Optimized {res.Optimized:n0}, skipped {res.Skipped:n0}" + (res.Failed > 0 ? $", {res.Failed:n0} failed" : "") +
+            var pastTense = organizeBy == OrganizeBy.Collections ? "Consolidated" :
+                            mode == OptimizeMode.MoveOnly ? "Moved" : "Optimized";
+            SetStatus($"{pastTense} {res.Optimized:n0}, skipped {res.Skipped:n0}" + (res.Failed > 0 ? $", {res.Failed:n0} failed" : "") +
                       (res.RecycleFailed > 0 ? $", {res.RecycleFailed:n0} original(s) not recycled" : "") +
-                      $". Freed ~{HumanBytes(res.FreedBytes)}. {_db.ImageCount(includeArchived: false):n0} images.");
+                      (res.FreedBytes > 0 ? $". Freed ~{HumanBytes(res.FreedBytes)}." : ".") +
+                      $" {_db.ImageCount(includeArchived: false):n0} images.");
         }
         catch (OperationCanceledException)
         {
-            SetStatus("Optimize cancelled.");
+            SetStatus(isConsolidate ? "Consolidation cancelled." : "Optimize cancelled.");
             _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
         }
-        catch (Exception ex) { SetStatus("Optimize failed: " + ex.Message); }
+        catch (Exception ex) { SetStatus($"{verb} failed: " + ex.Message); }
         finally { _busy = false; }
+    }
+
+    /// <summary>T44: Find images in <paramref name="eligibleIds"/> whose top-depth collection memberships
+    /// are tied (two or more collections at the same maximum depth). Used to pre-populate the
+    /// [Review ties…] badge count and seed <see cref="ReviewTiesForm"/>.</summary>
+    private List<TieCandidate> BuildTieCandidates(
+        IReadOnlyList<long> eligibleIds,
+        Dictionary<long, List<long>> memberMap,
+        Dictionary<long, int> depthMap,
+        Dictionary<long, CollectionNode> nodeMap)
+    {
+        var result = new List<TieCandidate>();
+        foreach (var id in eligibleIds)
+        {
+            if (!memberMap.TryGetValue(id, out var memberOf) || memberOf.Count < 2) continue;
+            int maxD = memberOf.Max(c => depthMap.TryGetValue(c, out var d) ? d : 0);
+            var tied = memberOf.Where(c => (depthMap.TryGetValue(c, out var d2) ? d2 : 0) == maxD).ToList();
+            if (tied.Count < 2) continue;
+            result.Add(new TieCandidate
+            {
+                ImageId  = id,
+                FileName = _db.GetById(id)?.FileName ?? $"id={id}",
+                Tied     = tied.Select(c => (c, nodeMap.TryGetValue(c, out var n) ? n.Name : $"id={c}", maxD)).ToList()
+            });
+        }
+        return result;
     }
 
     private static string HumanBytes(long b)

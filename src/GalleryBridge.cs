@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace TheTagHag;
@@ -61,6 +61,7 @@ public sealed class GalleryBridge
         var favoritesOnly = root.TryGetProperty("favoritesOnly", out var fo) && fo.ValueKind == JsonValueKind.True;
         var optimizedOnly = root.TryGetProperty("optimizedOnly", out var oo) && oo.ValueKind == JsonValueKind.True;   // T31
         long? collectionId = root.TryGetProperty("collectionId", out var ci) && ci.ValueKind == JsonValueKind.Number ? ci.GetInt64() : (long?)null;
+        var includeSubcollections = root.TryGetProperty("includeSubcollections", out var isc) && isc.ValueKind == JsonValueKind.True;  // T41
         // Folder view (T33): folderPath is a rel-DIR ("" = root-level), folderRoot scopes it to one
         // source root, includeSubfolders widens to the subtree. Present together or not at all.
         var folderPath = root.TryGetProperty("folderPath", out var fp) && fp.ValueKind == JsonValueKind.String ? fp.GetString() : null;
@@ -69,7 +70,7 @@ public sealed class GalleryBridge
         // Generation token: the page echoes it so the client can drop replies from a superseded query.
         var gen = root.TryGetProperty("gen", out var g) && g.ValueKind == JsonValueKind.Number ? g.GetInt32() : 0;
 
-        var (rows, total) = _db.Query(SearchParser.Parse(raw), page, size, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders);
+        var (rows, total) = _db.Query(SearchParser.Parse(raw), page, size, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders, includeSubcollections);
         var items = rows.Select(x => new
         {
             id = x.Id,
@@ -95,11 +96,12 @@ public sealed class GalleryBridge
         var favoritesOnly = root.TryGetProperty("favoritesOnly", out var fo) && fo.ValueKind == JsonValueKind.True;
         var optimizedOnly = root.TryGetProperty("optimizedOnly", out var oo) && oo.ValueKind == JsonValueKind.True;
         long? collectionId = root.TryGetProperty("collectionId", out var ci) && ci.ValueKind == JsonValueKind.Number ? ci.GetInt64() : (long?)null;
+        var includeSubcollections = root.TryGetProperty("includeSubcollections", out var isc) && isc.ValueKind == JsonValueKind.True;  // T41
         var folderPath = root.TryGetProperty("folderPath", out var fp) && fp.ValueKind == JsonValueKind.String ? fp.GetString() : null;
         var folderRoot = root.TryGetProperty("folderRoot", out var fr) && fr.ValueKind == JsonValueKind.String ? fr.GetString() : null;
         var includeSubfolders = root.TryGetProperty("includeSubfolders", out var isf) && isf.ValueKind == JsonValueKind.True;
         var gen = root.TryGetProperty("gen", out var g) && g.ValueKind == JsonValueKind.Number ? g.GetInt32() : 0;   // echoed so the client drops a stale select-all after a view switch
-        var ids = _db.QueryAllIds(SearchParser.Parse(raw), includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders);
+        var ids = _db.QueryAllIds(SearchParser.Parse(raw), includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders, includeSubcollections);
         return JsonSerializer.Serialize(new { type = "allids", gen, ids }, Json);
     }
 
@@ -115,14 +117,17 @@ public sealed class GalleryBridge
     }
 
     /// <summary>T30 Library Optimization preview: a cheap (count, skip, est bytes) tally for a scope at a
-    /// target size. scope = "all" | "selection" (with ids[]) | "folder:&lt;rel-path-prefix&gt;".</summary>
+    /// target size. T39: reads optional "mode" field ("MoveOnly" → all non-optimized regardless of size).
+    /// scope = "all" | "selection" (with ids[]) | "folder:&lt;rel-path-prefix&gt;".</summary>
     private string HandleOptimizePreview(JsonElement root)
     {
         var scope = root.TryGetProperty("scope", out var sc) ? sc.GetString() ?? "all" : "all";
         var maxDim = root.TryGetProperty("maxDim", out var md) && md.ValueKind == JsonValueKind.Number ? md.GetInt32() : ImageOptimizer.DefaultMaxDim;
         long[]? ids = root.TryGetProperty("ids", out var a) && a.ValueKind == JsonValueKind.Array
             ? a.EnumerateArray().Select(x => x.GetInt64()).ToArray() : null;
-        var (count, skip, bytes) = _db.OptimizePreview(scope, maxDim, ids);
+        var mode = root.TryGetProperty("mode", out var mv) && mv.GetString() == "MoveOnly"
+            ? OptimizeMode.MoveOnly : OptimizeMode.Downsample;
+        var (count, skip, bytes) = _db.OptimizePreview(scope, maxDim, ids, mode);
         return JsonSerializer.Serialize(new { type = "optpreview", count, skip, bytes }, Json);
     }
 
@@ -162,11 +167,12 @@ public sealed class GalleryBridge
     private string BuildTagsReply(long id) =>
         JsonSerializer.Serialize(new { type = "tags", id, prompt = _db.PromptTagsFor(id), user = _db.UserTagsFor(id) }, Json);
 
-    // -- Collections read (T28): the list for the sidebar + action-bar picker. Writes are host-side. --
+    // -- Collections read (T28/T41): the nested tree for the sidebar; writes are host-side. The action-bar
+    // picker (openColPicker) also consumes this — it renders a flat indented list client-side. --
     private string HandleCols()
     {
-        var items = _db.ListCollections().Select(c => new { id = c.Id, name = c.Name, count = c.Count });
-        return JsonSerializer.Serialize(new { type = "cols", items }, Json);
+        var tree = _db.CollectionTree();
+        return JsonSerializer.Serialize(new { type = "cols", tree }, Json);
     }
 
     // -- Folder tree read (T33/F24): the physical-folder navigation tree for the sidebar (distinct

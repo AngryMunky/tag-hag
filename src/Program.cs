@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Microsoft.Data.Sqlite;
 using Exif = SixLabors.ImageSharp.Metadata.Profiles.Exif;
 
@@ -66,6 +66,10 @@ internal static class Program
             return V3MigrateSelfTest();
         if (args.Any(a => string.Equals(a, "--selftest-v4migrate", StringComparison.OrdinalIgnoreCase)))
             return V4MigrateSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-v5migrate", StringComparison.OrdinalIgnoreCase)))
+            return V5MigrateSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-collnest", StringComparison.OrdinalIgnoreCase)))
+            return CollNestSelfTest();
         if (args.Any(a => string.Equals(a, "--selftest-optimizelib", StringComparison.OrdinalIgnoreCase)))
             return OptimizeLibrarySelfTest();
         if (args.Any(a => string.Equals(a, "--selftest-optindicator", StringComparison.OrdinalIgnoreCase)))
@@ -80,6 +84,12 @@ internal static class Program
             return SelectAllSelfTest();
         if (args.Any(a => string.Equals(a, "--selftest-scanprogress", StringComparison.OrdinalIgnoreCase)))
             return ScanProgressSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-storeloc", StringComparison.OrdinalIgnoreCase)))
+            return StoreLocSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-moveonly", StringComparison.OrdinalIgnoreCase)))
+            return MoveOnlySelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-collconsolidate", StringComparison.OrdinalIgnoreCase)))
+            return CollConsolidateSelfTest();
 
         if (args.Any(a => string.Equals(a, "--selftest-favorites", StringComparison.OrdinalIgnoreCase)))
             return FavoritesSelfTest();
@@ -1444,8 +1454,8 @@ internal static class Program
             using (new LibraryDb(freshPath)) { }
             using (var c = Open(freshPath))
             {
-                Check("fresh: schema_version = current (4)",
-                    L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion && LibraryDb.SchemaVersion == 4);
+                Check("fresh: schema_version = current",
+                    L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion);
                 Check("fresh: images.optimized column present", HasCol(c, "images", "optimized"));
                 Check("fresh: images.opt_dim column present", HasCol(c, "images", "opt_dim"));
                 Check("fresh: images.opt_at column present", HasCol(c, "images", "opt_at"));
@@ -2537,6 +2547,401 @@ internal static class Program
         catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-autotag-result.txt"); return 2; }
     }
 
+    // ---- T37 Configurable store location ----
+
+    /// <summary>T37: Exercises AppPaths.SetStoreDir injection, the LibraryStoreDir default fallback,
+    /// AppSettings defaults for the three new fields, and JSON round-trip of StoreDir/LegacyStoreRoots/
+    /// DefaultMode. Does NOT write to the real settings.json.</summary>
+    private static int StoreLocSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Configurable store location (T37) self-test");
+
+            // Save the current injection so we restore it afterward (test isolation).
+            var savedStore = AppPaths.LibraryStoreDir;
+
+            // ---- Default (null injection) returns beside-exe path ----
+            AppPaths.SetStoreDir(null);
+            var def = AppPaths.LibraryStoreDir;
+            Check("default LibraryStoreDir starts inside ExeDir", def.StartsWith(AppPaths.ExeDir, StringComparison.OrdinalIgnoreCase));
+            Check("default LibraryStoreDir ends with 'library-store'", def.EndsWith("library-store", StringComparison.OrdinalIgnoreCase));
+
+            // ---- SetStoreDir changes the returned path ----
+            var custom = Path.Combine(AppPaths.ExeDir, "selftest-storeloc-custom");
+            AppPaths.SetStoreDir(custom);
+            Check("SetStoreDir changes LibraryStoreDir", string.Equals(AppPaths.LibraryStoreDir, custom, StringComparison.OrdinalIgnoreCase));
+
+            // ---- Non-existent path does not crash LibraryStoreDir ----
+            AppPaths.SetStoreDir(Path.Combine(AppPaths.ExeDir, "does-not-exist-xyz-t37"));
+            bool noCrash = false;
+            try { _ = AppPaths.LibraryStoreDir; noCrash = true; } catch { }
+            Check("missing StoreDir does not crash LibraryStoreDir", noCrash);
+
+            // ---- SetStoreDir(null) reverts to the default ----
+            AppPaths.SetStoreDir(null);
+            Check("SetStoreDir(null) reverts to beside-exe default", string.Equals(AppPaths.LibraryStoreDir, def, StringComparison.OrdinalIgnoreCase));
+
+            // ---- AppSettings new-field defaults ----
+            var defaults = new AppSettings();
+            Check("AppSettings default: StoreDir is null", defaults.StoreDir is null);
+            Check("AppSettings default: LegacyStoreRoots is empty", defaults.LegacyStoreRoots.Count == 0);
+            Check("AppSettings default: DefaultMode is Downsample", defaults.DefaultMode == OptimizeMode.Downsample);
+
+            // ---- JSON round-trip of the three new T37 fields ----
+            var s = new AppSettings
+            {
+                StoreDir = custom,
+                LegacyStoreRoots = new List<string> { "legacy1", "legacy2" },
+                DefaultMode = OptimizeMode.MoveOnly,
+            };
+            var json = System.Text.Json.JsonSerializer.Serialize(s);
+            var s2 = System.Text.Json.JsonSerializer.Deserialize<AppSettings>(json)!;
+            Check("JSON round-trip: StoreDir preserved", s2.StoreDir == custom);
+            Check("JSON round-trip: LegacyStoreRoots count=2", s2.LegacyStoreRoots.Count == 2);
+            Check("JSON round-trip: LegacyStoreRoots[0]='legacy1'", s2.LegacyStoreRoots[0] == "legacy1");
+            Check("JSON round-trip: LegacyStoreRoots[1]='legacy2'", s2.LegacyStoreRoots[1] == "legacy2");
+            Check("JSON round-trip: DefaultMode=MoveOnly", s2.DefaultMode == OptimizeMode.MoveOnly);
+
+            // Restore injection.
+            AppPaths.SetStoreDir(savedStore == def ? null : savedStore);
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL");
+            WriteResultNamed(log, "selftest-storeloc-result.txt");
+            return ok ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            W("RESULT: FAIL (exception)");
+            W(ex.ToString());
+            WriteResultNamed(log, "selftest-storeloc-result.txt");
+            return 2;
+        }
+    }
+
+    // ---- T39 Move-only consolidation mode ----
+
+    /// <summary>T39: MoveOnly mode in LibraryOptimizer.Run — file moves to dest, not recycled (no
+    /// FreedBytes), opt_dim = actual edge (not maxDim), small images included (no size filter),
+    /// idempotent re-run skips. Also verifies OptimizeEligibleIds + OptimizePreview mode overloads.</summary>
+    private static int MoveOnlySelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Move-only consolidation (T39) self-test");
+
+            var work = Path.Combine(AppPaths.ExeDir, "selftest-moveonly-work");
+            if (Directory.Exists(work)) { try { Directory.Delete(work, true); } catch { } }
+            Directory.CreateDirectory(work);
+
+            // Two source images: one "big" (would be downsampled normally), one "small" (excluded in
+            // Downsample mode by the size filter, but included in MoveOnly).
+            string bigPng = Path.Combine(work, "big.png");
+            string smallPng = Path.Combine(work, "small.png");
+            MakePng(bigPng, 2000, 1500, "masterpiece, 1girl");
+            MakePng(smallPng, 300, 220, null);
+            long bigEdge = 2000, smallEdge = 300;
+
+            // Wire up a store dir isolated to this test.
+            var store = Path.Combine(AppPaths.ExeDir, "selftest-moveonly-store");
+            if (Directory.Exists(store)) { try { Directory.Delete(store, true); } catch { } }
+            AppPaths.SetStoreDir(store);
+
+            var dbPath = FreshDb("selftest-moveonly.db");
+            using var db = new LibraryDb(dbPath);
+            ImageRow Row(string abs)
+            {
+                var (w, h) = ImageOptimizer.ReadDimensions(abs);
+                var fi = new FileInfo(abs);
+                return new ImageRow
+                {
+                    SourceRoot = work, AbsPath = abs, RelPath = Path.GetRelativePath(work, abs),
+                    FileName = Path.GetFileName(abs), Ext = Path.GetExtension(abs).ToLowerInvariant(),
+                    SizeBytes = fi.Length, MtimeTicks = fi.LastWriteTimeUtc.Ticks, Width = w, Height = h,
+                    MetaFormat = "none", MetaSource = "none", Prompt = "", Negative = "", ScannedAt = "t",
+                    Tags = new List<string>()
+                };
+            }
+            db.Upsert(Row(bigPng)); db.Upsert(Row(smallPng));
+            long idBig = db.FindIdByAbsPath(bigPng)!.Value, idSmall = db.FindIdByAbsPath(smallPng)!.Value;
+
+            // ---- MoveOnly includes small images (no size filter) ----
+            var eligDownsample = db.OptimizeEligibleIds("all", 1024, null, OptimizeMode.Downsample);
+            var eligMoveOnly   = db.OptimizeEligibleIds("all", 1024, null, OptimizeMode.MoveOnly);
+            Check("Downsample eligible: only big (small excluded by size filter)", eligDownsample.Count == 1 && eligDownsample[0] == idBig);
+            Check("MoveOnly eligible: both images (no size filter)", eligMoveOnly.Count == 2);
+
+            var (pCountDn, pSkipDn, _)  = db.OptimizePreview("all", 1024, null, OptimizeMode.Downsample);
+            var (pCountMo, pSkipMo, _)  = db.OptimizePreview("all", 1024, null, OptimizeMode.MoveOnly);
+            Check("Downsample preview: count=1 skip=1", pCountDn == 1 && pSkipDn == 1);
+            Check("MoveOnly preview: count=2 skip=0 (all eligible)", pCountMo == 2 && pSkipMo == 0);
+
+            // ---- Run MoveOnly on both images ----
+            var res = LibraryOptimizer.Run(db, eligMoveOnly, 1024, OptimizeMode.MoveOnly, thumbs: null, progress: null, ct: default);
+            Check("MoveOnly run: optimized=2", res.Optimized == 2);
+            Check("MoveOnly run: skipped=0 (no size-skip in MoveOnly)", res.Skipped == 0);
+            Check("MoveOnly run: failed=0", res.Failed == 0);
+            Check("MoveOnly run: recycleFailed=0", res.RecycleFailed == 0);
+            Check("MoveOnly run: FreedBytes=0 (no recycle, no space freed)", res.FreedBytes == 0);
+
+            // ---- big: relocated to store, original gone, opt_dim = actual edge (not maxDim) ----
+            var rb = db.GetById(idBig)!;
+            Check("big: optimized flag set", rb.Optimized);
+            Check("big: AbsPath moved under store", rb.AbsPath.StartsWith(store, StringComparison.OrdinalIgnoreCase));
+            Check("big: original GONE (moved, not recycled)", !File.Exists(bigPng));
+            Check("big: store file EXISTS", File.Exists(rb.AbsPath));
+            Check("big: opt_dim = actual edge (2000, not maxDim 1024)", rb.OptDim == bigEdge);
+            Check("big: format preserved (PNG→PNG)", Path.GetExtension(rb.AbsPath).ToLowerInvariant() == ".png");
+
+            // ---- small: also relocated, opt_dim = actual small edge ----
+            var rs = db.GetById(idSmall)!;
+            Check("small: optimized flag set (MoveOnly includes small)", rs.Optimized);
+            Check("small: AbsPath moved under store", rs.AbsPath.StartsWith(store, StringComparison.OrdinalIgnoreCase));
+            Check("small: original GONE", !File.Exists(smallPng));
+            Check("small: store file EXISTS", File.Exists(rs.AbsPath));
+            Check("small: opt_dim = actual small edge (300, not maxDim 1024)", rs.OptDim == smallEdge);
+            Check("row count preserved (no double-row)", db.ImageCount() == 2);
+
+            // ---- Idempotency: nothing eligible after a full MoveOnly run ----
+            var elig2 = db.OptimizeEligibleIds("all", 1024, null, OptimizeMode.MoveOnly);
+            Check("idempotent: no eligible images after MoveOnly run", elig2.Count == 0);
+            var res2 = LibraryOptimizer.Run(db, elig2, 1024, OptimizeMode.MoveOnly, thumbs: null, progress: null, ct: default);
+            Check("idempotent: re-run optimizes nothing", res2.Optimized == 0 && res2.Failed == 0);
+
+            // ---- Cleanup ----
+            AppPaths.SetStoreDir(null);
+            try { Directory.Delete(work, true); } catch { }
+            try { Directory.Delete(store, true); } catch { }
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL");
+            WriteResultNamed(log, "selftest-moveonly-result.txt");
+            return ok ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            W("RESULT: FAIL (exception)");
+            W(ex.ToString());
+            WriteResultNamed(log, "selftest-moveonly-result.txt");
+            return 2;
+        }
+    }
+
+    /// <summary>T44/F31 self-test: Consolidate-by-collection path resolution, SanitizeFolderName, BuildDepthMap,
+    /// BuildCollectionPaths, FindHome (deepest wins / tie-break / tieOverrides), _Uncollected placement,
+    /// skip-uncollected, already-optimized relocation (T38 absorbed), GetCollectionMemberships batch.</summary>
+    private static int CollConsolidateSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Consolidate by Collection tree (T44) self-test");
+
+            // ── Static-helper unit tests (no DB) ─────────────────────────────────────────
+
+            // SanitizeFolderName
+            Check("sanitize: letters/digits/-._ preserved",      LibraryOptimizer.SanitizeFolderName("My-Art_01.png") == "My-Art_01.png");
+            Check("sanitize: spaces/special → _ (trim trailing _)", LibraryOptimizer.SanitizeFolderName("My Art (2024)") == "My_Art__2024");
+            Check("sanitize: empty/whitespace → _unnamed",       LibraryOptimizer.SanitizeFolderName("   ") == "_unnamed");
+
+            // Tree: Art(id=1,depth=0) → Characters(id=3,depth=1)
+            //       Anime(id=2,depth=0)
+            var treeArt  = new CollectionNode { Id = 1, Name = "Art",        ParentId = null };
+            var treeAnim = new CollectionNode { Id = 2, Name = "Anime",      ParentId = null };
+            var treeChar = new CollectionNode { Id = 3, Name = "Characters", ParentId = 1 };
+            treeArt.Children.Add(treeChar);
+            var tree = new List<CollectionNode> { treeArt, treeAnim };
+
+            var depthMap = LibraryOptimizer.BuildDepthMap(tree);
+            Check("depthMap: Art=0",        depthMap.TryGetValue(1, out var dA) && dA == 0);
+            Check("depthMap: Anime=0",      depthMap.TryGetValue(2, out var dAn) && dAn == 0);
+            Check("depthMap: Characters=1", depthMap.TryGetValue(3, out var dC) && dC == 1);
+
+            var collPaths = LibraryOptimizer.BuildCollectionPaths(tree);
+            Check("collPaths: Art=[\"Art\"]",               collPaths.TryGetValue(1, out var pA) && pA.Length == 1 && pA[0] == "Art");
+            Check("collPaths: Anime=[\"Anime\"]",           collPaths.TryGetValue(2, out var pAn) && pAn.Length == 1 && pAn[0] == "Anime");
+            Check("collPaths: Characters=[Art,Characters]", collPaths.TryGetValue(3, out var pC) && pC.Length == 2 && pC[1] == "Characters");
+
+            // FindHome: deepest wins (Characters depth=1 > Art depth=0)
+            bool tied;
+            var home1 = LibraryOptimizer.FindHome(new[] { 1L, 3L }, depthMap, null, 99, out tied);
+            Check("FindHome: deepest wins (Characters over Art)", home1 == 3L && !tied);
+
+            // FindHome: tie-break = lowest id (Art=1, Anime=2, both depth=0)
+            var home2 = LibraryOptimizer.FindHome(new[] { 1L, 2L }, depthMap, null, 99, out tied);
+            Check("FindHome: tie-break lowest id (Art=1 < Anime=2)", home2 == 1L && tied);
+
+            // FindHome: tieOverride wins
+            var overrides = new Dictionary<long, long> { [42L] = 2L };
+            var home3 = LibraryOptimizer.FindHome(new[] { 1L, 2L }, depthMap, overrides, 42L, out tied);
+            Check("FindHome: tieOverride wins (→ Anime=2)", home3 == 2L && !tied);
+
+            // BUG-T44-01 regression: isTied must be true even when the lower-id member appears SECOND
+            // in the list (the combined if-branch was resetting tiedCount=1 when updating bestId).
+            var home2r = LibraryOptimizer.FindHome(new[] { 2L, 1L }, depthMap, null, 99, out tied);
+            Check("FindHome: isTied=true when lower-id listed second (BUG-T44-01)", home2r == 1L && tied);
+
+            // ── Runtime DB test ───────────────────────────────────────────────────────────
+            var work = Path.Combine(AppPaths.ExeDir, "selftest-collconsolidate-work");
+            if (Directory.Exists(work)) { try { Directory.Delete(work, true); } catch { } }
+            Directory.CreateDirectory(work);
+
+            // 6 source images
+            var imgPaths = Enumerable.Range(1, 6).Select(i => Path.Combine(work, $"img{i}.png")).ToArray();
+            foreach (var p in imgPaths) MakePng(p, 600, 400, null);
+
+            var store = Path.Combine(AppPaths.ExeDir, "selftest-collconsolidate-store");
+            if (Directory.Exists(store)) { try { Directory.Delete(store, true); } catch { } }
+            AppPaths.SetStoreDir(store);
+
+            var dbPath = FreshDb("selftest-collconsolidate.db");
+            using var db = new LibraryDb(dbPath);
+            ImageRow MakeRow(string abs) { var (w, h) = ImageOptimizer.ReadDimensions(abs); var fi = new FileInfo(abs);
+                return new ImageRow { SourceRoot = work, AbsPath = abs, RelPath = Path.GetRelativePath(work, abs),
+                    FileName = Path.GetFileName(abs), Ext = ".png", SizeBytes = fi.Length, MtimeTicks = fi.LastWriteTimeUtc.Ticks,
+                    Width = w, Height = h, MetaFormat = "none", MetaSource = "none", Prompt = "", Negative = "",
+                    ScannedAt = "t", Tags = new List<string>() }; }
+            foreach (var p in imgPaths) db.Upsert(MakeRow(p));
+            var ids = imgPaths.Select(p => db.FindIdByAbsPath(p)!.Value).ToArray();
+            // ids[0]=img1, ids[1]=img2, ids[2]=img3, ids[3]=img4, ids[4]=img5, ids[5]=img6
+
+            // Collections in DB
+            long artId  = db.CreateCollection("Art");
+            long animId = db.CreateCollection("Anime");
+            long charId = db.CreateCollection("Characters", animId);  // child of Anime
+
+            // img1 → Art only
+            db.AddToCollection(artId,  new[] { ids[0] });
+            // img2 → Anime only
+            db.AddToCollection(animId, new[] { ids[1] });
+            // img3 → Characters only (deepest = 1)
+            db.AddToCollection(charId, new[] { ids[2] });
+            // img4 → Art AND Characters → Characters wins (deeper)
+            db.AddToCollection(artId,  new[] { ids[3] });
+            db.AddToCollection(charId, new[] { ids[3] });
+            // img5 → Art AND Anime → tie (both depth=0), lowest id wins
+            db.AddToCollection(artId,  new[] { ids[4] });
+            db.AddToCollection(animId, new[] { ids[4] });
+            // img6 → uncollected (no membership)
+
+            // GetCollectionMemberships
+            var allIds = ids.ToList();
+            var memberMap = db.GetCollectionMemberships(allIds);
+            Check("memberMap: img1 in Art only",         memberMap.TryGetValue(ids[0], out var m1) && m1.Count == 1);
+            Check("memberMap: img4 in Art+Characters",   memberMap.TryGetValue(ids[3], out var m4) && m4.Count == 2);
+            Check("memberMap: img6 not in memberMap",    !memberMap.ContainsKey(ids[5]));
+
+            // Collections eligible: all non-archived (6 images)
+            var colElig = db.OptimizeEligibleIds("all", 1024, null, OptimizeMode.MoveOnly, OrganizeBy.Collections);
+            Check("collections eligible: all 6 (no size filter, no optimized=0 filter)", colElig.Count == 6);
+
+            // Run Collections mode (all images)
+            var res = LibraryOptimizer.Run(db, colElig, 1024, OptimizeMode.MoveOnly, OrganizeBy.Collections,
+                tieOverrides: null, skipUncollected: false, collectionTree: null, thumbs: null, progress: null, ct: default);
+            Check("run: optimized=6", res.Optimized == 6);
+            Check("run: failed=0",    res.Failed == 0);
+
+            // img1 → Art/
+            var r1 = db.GetById(ids[0])!;
+            Check("img1 under Art/",                    r1.AbsPath.Contains($"{Path.DirectorySeparatorChar}Art{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase));
+            Check("img1 optimized=true",                r1.Optimized);
+            Check("img1 original gone",                 !File.Exists(imgPaths[0]));
+
+            // img3 → Anime/Characters/
+            var r3 = db.GetById(ids[2])!;
+            Check("img3 under Anime/Characters/ (deepest)", r3.AbsPath.Contains("Characters", StringComparison.OrdinalIgnoreCase));
+
+            // img4 → Art=depth0 vs Characters=depth1 → Characters wins
+            var r4 = db.GetById(ids[3])!;
+            Check("img4 under Characters/ (deepest wins over Art)", r4.AbsPath.Contains("Characters", StringComparison.OrdinalIgnoreCase));
+
+            // img5 → Art(artId) vs Anime(animId) → lowest id wins
+            var r5 = db.GetById(ids[4])!;
+            long lowestCollId = Math.Min(artId, animId);
+            bool img5UnderArt = r5.AbsPath.Contains("Art", StringComparison.OrdinalIgnoreCase) && !r5.AbsPath.Contains("Anime", StringComparison.OrdinalIgnoreCase);
+            bool img5UnderAnim = r5.AbsPath.Contains("Anime", StringComparison.OrdinalIgnoreCase);
+            bool img5CorrectTieBreak = lowestCollId == artId ? img5UnderArt : img5UnderAnim;
+            Check("img5: tie-break = lowest collection_id wins", img5CorrectTieBreak);
+
+            // img6 → _Uncollected/
+            var r6 = db.GetById(ids[5])!;
+            Check("img6 under _Uncollected/",           r6.AbsPath.Contains("_Uncollected", StringComparison.OrdinalIgnoreCase));
+
+            // Already-optimized relocation: img1 is now in store under Art/. Move the
+            // record to simulate it being at a wrong (SourceFolders) path, then re-run
+            // to verify it relocates.
+            var wrongPath = Path.Combine(store, "wrong", "img1.png");
+            Directory.CreateDirectory(Path.GetDirectoryName(wrongPath)!);
+            if (File.Exists(r1.AbsPath)) File.Move(r1.AbsPath, wrongPath);
+            db.RepathRow(ids[0], wrongPath, store);
+            var r1b = db.GetById(ids[0])!;
+            Check("pre-relocation: img1 at wrong path", r1b.AbsPath.Equals(wrongPath, StringComparison.OrdinalIgnoreCase));
+            var colElig2 = db.OptimizeEligibleIds("all", 1024, null, OptimizeMode.MoveOnly, OrganizeBy.Collections);
+            var res2 = LibraryOptimizer.Run(db, colElig2, 1024, OptimizeMode.MoveOnly, OrganizeBy.Collections,
+                tieOverrides: null, skipUncollected: false, collectionTree: null, thumbs: null, progress: null, ct: default);
+            Check("relocation run: at least 1 optimized (img1 relocated)", res2.Optimized >= 1);
+            var r1c = db.GetById(ids[0])!;
+            Check("img1 relocated to Art/ (no longer at wrong path)", !r1c.AbsPath.Equals(wrongPath, StringComparison.OrdinalIgnoreCase));
+            Check("img1 still optimized after relocation",             r1c.Optimized);
+
+            // Skip-uncollected: with a fresh set of unoptimized images, img6-equivalent is skipped
+            // (We test the flag by checking eligible count changes with skipUncollected=true.
+            // Because img5 is already optimized, easiest to test via a synthetic run with a new image.)
+            // Simpler: just verify skipped increments when skipUncollected=true vs false on a fresh run.
+            var skipWork = Path.Combine(work, "skip-test");
+            Directory.CreateDirectory(skipWork);
+            var skipImg = Path.Combine(skipWork, "nocoll.png");
+            MakePng(skipImg, 600, 400, null);
+            db.Upsert(MakeRow(skipImg));
+            var skipId = db.FindIdByAbsPath(skipImg)!.Value;
+            var skipElig = db.OptimizeEligibleIds("all", 1024, null, OptimizeMode.MoveOnly, OrganizeBy.Collections);
+            // Run with skipUncollected=true, pick only the new uncollected image
+            var skipOnly = new List<long> { skipId };
+            var resSkip = LibraryOptimizer.Run(db, skipOnly, 1024, OptimizeMode.MoveOnly, OrganizeBy.Collections,
+                tieOverrides: null, skipUncollected: true, collectionTree: null, thumbs: null, progress: null, ct: default);
+            Check("skipUncollected=true: uncollected image is skipped (not failed)", resSkip.Skipped == 1 && resSkip.Failed == 0 && resSkip.Optimized == 0);
+
+            // tieOverride: img5 is already consolidated; test the static FindHome with an override
+            // (runtime override path exercised via FindHome unit tests above; skip live relocation re-run).
+
+            // BUG-T44-02 regression: re-running on an already-correctly-placed optimized image must
+            // SKIP it — not rename it to "img (2).png" because UniqueDestination finds the file at destDir.
+            var r1d = db.GetById(ids[0])!;
+            var correctPath2 = r1d.AbsPath;
+            var resIdemp = LibraryOptimizer.Run(db, new List<long> { ids[0] }, 1024, OptimizeMode.MoveOnly, OrganizeBy.Collections,
+                tieOverrides: null, skipUncollected: false, collectionTree: null, thumbs: null, progress: null, ct: default);
+            var r1e = db.GetById(ids[0])!;
+            Check("idempotency (BUG-T44-02): already-correct optimized image is skipped, not renamed",
+                resIdemp.Skipped == 1 && resIdemp.Optimized == 0 && r1e.AbsPath.Equals(correctPath2, StringComparison.OrdinalIgnoreCase));
+
+            // Cleanup
+            AppPaths.SetStoreDir(null);
+            try { Directory.Delete(work, true); } catch { }
+            try { Directory.Delete(store, true); } catch { }
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL");
+            WriteResultNamed(log, "selftest-collconsolidate-result.txt");
+            return ok ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            W("RESULT: FAIL (exception)");
+            W(ex.ToString());
+            WriteResultNamed(log, "selftest-collconsolidate-result.txt");
+            return 2;
+        }
+    }
+
     private static string FreshDb(string name)
     {
         var p = Path.Combine(AppPaths.ExeDir, name);
@@ -2569,5 +2974,222 @@ internal static class Program
     {
         try { File.WriteAllText(Path.Combine(AppPaths.ExeDir, "selftest-result.txt"), log.ToString()); }
         catch { /* best-effort */ }
+    }
+
+    // ---- T41/T42: v5 schema migration + nested-collections data layer ----
+
+    private static int V5MigrateSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder();
+        var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string label, bool cond) { if (!cond) ok = false; W($"  [{(cond ? "ok" : "FAIL")}] {label}"); }
+
+        SqliteConnection Open(string p) { var c = new SqliteConnection($"Data Source={p}"); c.Open(); Exec(c, "PRAGMA foreign_keys=ON;"); return c; }
+        bool HasCol(SqliteConnection c, string table, string col)
+        {
+            using var cmd = c.CreateCommand(); cmd.CommandText = $"PRAGMA table_info({table});";
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read()) if (string.Equals(rd.GetString(1), col, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+        bool Obj(SqliteConnection c, string type, string name) =>
+            Convert.ToInt64(Scalar(c, $"SELECT COUNT(*) FROM sqlite_master WHERE type='{type}' AND name='{name}';")) > 0;
+        long L(SqliteConnection c, string sql) => Convert.ToInt64(Scalar(c, sql) ?? 0L);
+
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — v5 schema (nested collections parent_id, T41) self-test");
+
+            // ---- Part 1: fresh DB is born at v5 with parent_id column + index ----
+            var freshPath = FreshDb("selftest-v5-fresh.db");
+            using (new LibraryDb(freshPath)) { }
+            using (var c = Open(freshPath))
+            {
+                Check("fresh: schema_version = current", L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion);
+                Check("fresh: collections.parent_id column present", HasCol(c, "collections", "parent_id"));
+                Check("fresh: ix_collections_parent index present", Obj(c, "index", "ix_collections_parent"));
+            }
+
+            // ---- Part 2: existing v4 DB (no parent_id) upgrades cleanly to v5 ----
+            var v4Path = FreshDb("selftest-v4-for-v5upgrade.db");
+            // Build a minimal v4 DB by hand (pre-v5 schema: no parent_id column).
+            using (var c = Open(v4Path))
+            {
+                Exec(c, "PRAGMA journal_mode=WAL;");
+                Exec(c, @"CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS images(id INTEGER PRIMARY KEY, source_root TEXT NOT NULL DEFAULT '', rel_path TEXT NOT NULL DEFAULT '',
+  abs_path TEXT NOT NULL DEFAULT '', file_name TEXT NOT NULL DEFAULT '', ext TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0, mtime_ticks INTEGER NOT NULL DEFAULT 0, meta_format TEXT,
+  meta_source TEXT, prompt TEXT NOT NULL DEFAULT '', negative TEXT NOT NULL DEFAULT '',
+  params_json TEXT, thumb_path TEXT, original_state TEXT NOT NULL DEFAULT 'present',
+  archived INTEGER NOT NULL DEFAULT 0, scanned_at TEXT NOT NULL DEFAULT '',
+  phash INTEGER, favorite INTEGER NOT NULL DEFAULT 0,
+  optimized INTEGER NOT NULL DEFAULT 0, opt_dim INTEGER, opt_at TEXT, UNIQUE(abs_path));
+CREATE TABLE IF NOT EXISTS image_tags(image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE, token TEXT NOT NULL, PRIMARY KEY(image_id,token));
+CREATE TABLE IF NOT EXISTS tag_freq(token TEXT PRIMARY KEY, df INTEGER NOT NULL);
+CREATE VIRTUAL TABLE IF NOT EXISTS images_fts USING fts5(prompt,negative,content='images',content_rowid='id');
+CREATE TABLE IF NOT EXISTS image_notes(image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE, body TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS user_tags(image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE, token TEXT NOT NULL, PRIMARY KEY(image_id,token));
+CREATE TABLE IF NOT EXISTS user_tag_freq(token TEXT PRIMARY KEY, df INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS collections(id INTEGER PRIMARY KEY, name TEXT NOT NULL, UNIQUE(name COLLATE NOCASE));
+CREATE TABLE IF NOT EXISTS collection_items(collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE, image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE, PRIMARY KEY(collection_id,image_id));
+INSERT INTO meta(k,v) VALUES('schema_version','4');");
+                // Seed some collections (all roots at v4, no parent_id)
+                Exec(c, "INSERT INTO collections(name) VALUES('Alpha');");
+                Exec(c, "INSERT INTO collections(name) VALUES('Beta');");
+            }
+            // Open via LibraryDb → triggers Migrate() → should add parent_id + index
+            using (new LibraryDb(v4Path)) { }
+            using (var c = Open(v4Path))
+            {
+                Check("v4→v5: schema_version upgraded", L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion);
+                Check("v4→v5: collections.parent_id column added", HasCol(c, "collections", "parent_id"));
+                Check("v4→v5: ix_collections_parent index added", Obj(c, "index", "ix_collections_parent"));
+                Check("v4→v5: existing collections survive with parent_id=NULL", L(c, "SELECT COUNT(*) FROM collections WHERE parent_id IS NULL;") == 2);
+            }
+
+            // ---- Part 3: idempotent — opening v5 again changes nothing ----
+            using (new LibraryDb(v4Path)) { }
+            using (var c = Open(v4Path))
+            {
+                Check("idempotent: schema_version still current", L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion);
+                Check("idempotent: collections count unchanged", L(c, "SELECT COUNT(*) FROM collections;") == 2);
+            }
+
+            W(ok ? "PASS" : "FAIL");
+            WriteResultNamed(log, "selftest-v5migrate-result.txt");
+            return ok ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            W("EXCEPTION: " + ex.Message);
+            WriteResultNamed(log, "selftest-v5migrate-result.txt");
+            return 2;
+        }
+    }
+
+    private static int CollNestSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder();
+        var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string label, bool cond) { if (!cond) ok = false; W($"  [{(cond ? "ok" : "FAIL")}] {label}"); }
+
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — nested collections CRUD + tree + includeSubcollections (T41) self-test");
+            var path = FreshDb("selftest-collnest.db");
+            using var db = new LibraryDb(path);
+            var Q = SearchParser.Parse("");
+
+            // ---- Nested CRUD ----
+            var rootA = db.CreateCollection("Animals");
+            var rootB = db.CreateCollection("Plants");
+            Check("create root A", rootA > 0);
+            Check("create root B", rootB > 0);
+            var catId  = db.CreateCollection("Cats", rootA);
+            var dogId  = db.CreateCollection("Dogs", rootA);
+            var tabId  = db.CreateCollection("Tabby", catId);
+            Check("create sub-collection (Cats under Animals)", catId > 0);
+            Check("create sub-sub-collection (Tabby under Cats)", tabId > 0);
+            Check("duplicate name rejected (-1)", db.CreateCollection("Animals") == -1);
+            Check("invalid parent rejected (-2)", db.CreateCollection("Ghost", 99999L) == -2);
+
+            // ---- CollectionTree structure ----
+            var tree = db.CollectionTree();
+            Check("tree: 2 roots", tree.Count == 2);
+            var aNode = tree.FirstOrDefault(n => n.Name == "Animals");
+            var bNode = tree.FirstOrDefault(n => n.Name == "Plants");
+            Check("tree: Animals root present", aNode is not null);
+            Check("tree: Plants root present", bNode is not null);
+            Check("tree: Animals has 2 children (Cats, Dogs)", aNode?.Children.Count == 2);
+            var catNode = aNode?.Children.FirstOrDefault(n => n.Name == "Cats");
+            Check("tree: Cats has 1 child (Tabby)", catNode?.Children.Count == 1);
+            Check("tree: Tabby has no children", catNode?.Children[0].Children.Count == 0);
+            Check("tree: children sorted (Cats before Dogs)", aNode?.Children[0].Name == "Cats");
+
+            // ---- Recursive counts (empty — no images yet) ----
+            Check("tree: CountRecursive=0 when no images", tree.All(n => n.CountRecursive == 0));
+
+            // ---- Seed images and membership ----
+            void SeedImage(long id, string name)
+            {
+                using var cmd = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}");
+                cmd.Open();
+                using var c = cmd.CreateCommand();
+                // id-scoped paths satisfy UNIQUE(abs_path) so each seeded image gets its own row.
+                c.CommandText = "INSERT OR IGNORE INTO images(id,source_root,rel_path,abs_path,file_name,ext,size_bytes,mtime_ticks,scanned_at,prompt,negative) VALUES($id,'C:\\R',$rel,$abs,$nm,'png',1,1,'2024-01-01','','');";
+                c.Parameters.AddWithValue("$id", id);
+                c.Parameters.AddWithValue("$rel", $"{name}_{id}.png");
+                c.Parameters.AddWithValue("$abs", $"C:\\R\\{name}_{id}.png");
+                c.Parameters.AddWithValue("$nm", name);
+                c.ExecuteNonQuery();
+            }
+            SeedImage(101, "cat1"); SeedImage(102, "cat2"); SeedImage(103, "tabby1"); SeedImage(104, "dog1");
+            db.AddToCollection(catId,  new[] { 101L, 102L });
+            db.AddToCollection(tabId,  new[] { 103L });
+            db.AddToCollection(dogId,  new[] { 104L });
+            db.AddToCollection(rootA,  new[] { 101L });  // also directly in Animals
+
+            tree = db.CollectionTree();
+            aNode = tree.FirstOrDefault(n => n.Name == "Animals");
+            catNode = aNode?.Children.FirstOrDefault(n => n.Name == "Cats");
+            var tabNode = catNode?.Children.FirstOrDefault(n => n.Name == "Tabby");
+            var dogNode = aNode?.Children.FirstOrDefault(n => n.Name == "Dogs");
+            Check("count: Animals direct=1", aNode?.Count == 1);
+            Check("count: Cats direct=2",    catNode?.Count == 2);
+            Check("count: Tabby direct=1",   tabNode?.Count == 1);
+            Check("count: Dogs direct=1",    dogNode?.Count == 1);
+            Check("count: Animals recursive=5 (1+2+1+1)", aNode?.CountRecursive == 5);
+            Check("count: Cats recursive=3 (2+1)", catNode?.CountRecursive == 3);
+
+            // ---- CollectionAndDescendantIds ----
+            var descA = db.CollectionAndDescendantIds(rootA);
+            Check("descendants of Animals includes Animals+Cats+Dogs+Tabby (4)", descA.Count == 4 && descA.Contains(rootA) && descA.Contains(catId) && descA.Contains(dogId) && descA.Contains(tabId));
+            var descCat = db.CollectionAndDescendantIds(catId);
+            Check("descendants of Cats includes Cats+Tabby (2)", descCat.Count == 2 && descCat.Contains(catId) && descCat.Contains(tabId));
+            var descLeaf = db.CollectionAndDescendantIds(tabId);
+            Check("descendants of Tabby = just Tabby (1)", descLeaf.Count == 1 && descLeaf[0] == tabId);
+
+            // ---- includeSubcollections query parity ----
+            var (directPage, directTotal) = db.Query(Q, 0, 100, false, collectionId: catId, includeSubcollections: false);
+            Check("query Cats direct-only: total=2", directTotal == 2);
+            var (subPage, subTotal) = db.Query(Q, 0, 100, false, collectionId: catId, includeSubcollections: true);
+            Check("query Cats include-sub: total=3 (Cats+Tabby)", subTotal == 3);
+            var allIdsDir = db.QueryAllIds(Q, false, collectionId: catId, includeSubcollections: false);
+            var allIdsSub = db.QueryAllIds(Q, false, collectionId: catId, includeSubcollections: true);
+            Check("QueryAllIds direct count=2", allIdsDir.Count == 2);
+            Check("QueryAllIds sub count=3", allIdsSub.Count == 3);
+            Check("page==total parity direct", directPage.Count == directTotal);
+            Check("page==total parity sub",    subPage.Count == subTotal);
+
+            // ---- DeleteCollection promotes children (R28) ----
+            db.DeleteCollection(catId);   // Cats had children: Tabby → should become child of Animals
+            tree = db.CollectionTree();
+            aNode = tree.FirstOrDefault(n => n.Name == "Animals");
+            Check("after delete Cats: Animals has 2 children (Dogs+Tabby promoted)", aNode?.Children.Count == 2);
+            Check("after delete Cats: Tabby is now direct child of Animals", aNode?.Children.Any(n => n.Name == "Tabby") == true);
+            Check("after delete Cats: Dogs still present", aNode?.Children.Any(n => n.Name == "Dogs") == true);
+
+            // ---- Promote to root: delete Animals root → Tabby+Dogs become roots ----
+            db.DeleteCollection(rootA);
+            tree = db.CollectionTree();
+            Check("after delete Animals: 3 roots (Plants+Tabby+Dogs)", tree.Count == 3);
+            Check("after delete Animals: Tabby is now a root", tree.Any(n => n.Name == "Tabby"));
+            Check("after delete Animals: Dogs is now a root", tree.Any(n => n.Name == "Dogs"));
+
+            W(ok ? "PASS" : "FAIL");
+            WriteResultNamed(log, "selftest-collnest-result.txt");
+            return ok ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            W("EXCEPTION: " + ex.Message);
+            WriteResultNamed(log, "selftest-collnest-result.txt");
+            return 2;
+        }
     }
 }
