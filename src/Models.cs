@@ -97,6 +97,18 @@ public sealed class TieCandidate
     public List<(long CollId, string Name, int Depth)> Tied { get; set; } = new();
 }
 
+/// <summary>T45/F32 — one saved search ("Potion"). Name is case-insensitive unique in the
+/// potions table. Query is the raw search string (same syntax as the main search bar).
+/// SortOrder drives the sidebar display order.</summary>
+public sealed class PotionRow
+{
+    public long Id { get; set; }
+    public string Name { get; set; } = "";
+    public string Query { get; set; } = "";
+    public string CreatedAt { get; set; } = "";
+    public int SortOrder { get; set; }
+}
+
 /// <summary>One auto-tag suggestion: a candidate token + how many similar images carry it (T27).</summary>
 public sealed record AutotagSuggestion(string Token, int Votes);
 

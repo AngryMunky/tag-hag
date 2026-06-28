@@ -142,6 +142,7 @@ public sealed class MainForm : Form
     {
         _db = new LibraryDb(AppPaths.LibraryDbFile);
         _bridge = new GalleryBridge(_db, UrlFor);
+        AutoSeedPotions();   // T45/F32: seeds once from top tags; push fires after WebView2 is ready below
 
         await _web.EnsureCoreWebView2Async(null);
         _web.CoreWebView2.WebMessageReceived += OnWebMessage;
@@ -209,7 +210,7 @@ public sealed class MainForm : Form
             FormBorderStyle = FormBorderStyle.FixedDialog,
             StartPosition = FormStartPosition.CenterParent,
             MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
-            ClientSize = new Size(460, 180),
+            ClientSize = new Size(460, 200),
             BackColor = Color.FromArgb(0x14, 0x10, 0x18),
             ForeColor = Color.FromArgb(0xD8, 0xD0, 0xBF),
             Font = new Font("Segoe UI", 9f),
@@ -219,7 +220,7 @@ public sealed class MainForm : Form
         dlg.Controls.Add(new Label { Text = "Where should your library live?", ForeColor = Color.FromArgb(0xA4, 0xFF, 0x6A), Font = new Font("Segoe UI", 11f, FontStyle.Bold), AutoSize = true, Location = new Point(16, 14) });
         dlg.Controls.Add(new Label { Text = "Tag Hag stores optimized and consolidated images in a managed folder.\nThe default is beside the app (portable). You can change this later in Settings.", ForeColor = Color.FromArgb(0x8A, 0x84, 0x95), Size = new Size(428, 40), Location = new Point(16, 48) });
 
-        var chooseBtn = new Button { Text = "Choose a folder…", Location = new Point(16, 132), Width = 130, FlatStyle = FlatStyle.Flat, ForeColor = Color.FromArgb(0xD8, 0xD0, 0xBF), BackColor = Color.FromArgb(0x1B, 0x16, 0x22) };
+        var chooseBtn = new Button { Text = "Choose a folder…", Location = new Point(16, 140), Width = 130, Height = 32, FlatStyle = FlatStyle.Flat, ForeColor = Color.FromArgb(0xD8, 0xD0, 0xBF), BackColor = Color.FromArgb(0x1B, 0x16, 0x22) };
         chooseBtn.FlatAppearance.BorderColor = Color.FromArgb(0x5B, 0x3B, 0x8C);
         chooseBtn.Click += (_, _) =>
         {
@@ -231,7 +232,7 @@ public sealed class MainForm : Form
             }
             dlg.Close();
         };
-        var defaultBtn = new Button { Text = "Use default (beside app)", Location = new Point(162, 132), Width = 168, DialogResult = DialogResult.OK, FlatStyle = FlatStyle.Flat, ForeColor = Color.FromArgb(0x14, 0x10, 0x18), BackColor = Color.FromArgb(0xA4, 0xFF, 0x6A) };
+        var defaultBtn = new Button { Text = "Use default (beside app)", Location = new Point(162, 140), Width = 168, Height = 32, DialogResult = DialogResult.OK, FlatStyle = FlatStyle.Flat, ForeColor = Color.FromArgb(0x14, 0x10, 0x18), BackColor = Color.FromArgb(0xA4, 0xFF, 0x6A) };
         defaultBtn.FlatAppearance.BorderSize = 0;
 
         dlg.AcceptButton = defaultBtn;
@@ -671,6 +672,8 @@ public sealed class MainForm : Form
                       $"{_db.ImageCount(includeArchived: false):n0} images.");
             _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "scandone", added = r.Added, updated = r.Updated, removed = r.Removed, failed = r.Failed, reLinked = r.ReLinked, unmatched = r.Unmatched, canceled = false }));
             _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
+            AutoSeedPotions();   // T45/F32: seeds once when library first reaches threshold; pushes + status intro if triggered
+            PushPotions();       // always refresh live Potion counts after library changes
         }
         catch (OperationCanceledException)
         {
@@ -1196,6 +1199,28 @@ public sealed class MainForm : Form
     {
         var r = _bridge.Handle("{\"type\":\"cols\"}");
         if (r is not null) _web.CoreWebView2?.PostWebMessageAsString(r);
+    }
+
+    /// <summary>Re-send the Potions list to the gallery (sidebar) after a mutation or scan. Reuses the
+    /// bridge's read handler so the JSON shape stays in one place.</summary>
+    private void PushPotions()
+    {
+        var r = _bridge.Handle("{\"type\":\"potions\"}");
+        if (r is not null) _web.CoreWebView2?.PostWebMessageAsString(r);
+    }
+
+    /// <summary>One-time auto-seed: creates Potions from the top frequent prompt tags (T45/F32).
+    /// Called after DB open at startup and at the end of DoScan until seeded. Silent on an empty
+    /// library (returns without marking seeded so the next scan retries).</summary>
+    private void AutoSeedPotions()
+    {
+        if (_db.IsPotionSeeded()) return;
+        var tags = _db.TopSeedableTags(minCount: 50, maxFraction: 0.80, limit: 10);
+        if (tags.Count == 0) return;   // library too small or all tags are universal — retry after next scan
+        foreach (var tag in tags) _db.CreatePotion(name: tag, query: tag);
+        _db.MarkPotionSeeded();
+        PushPotions();
+        SetStatus($"🧪 Potions ready — brewed {tags.Count} from your most common tags.");
     }
 
     private void RestoreWindowBounds()

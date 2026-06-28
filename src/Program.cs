@@ -90,6 +90,8 @@ internal static class Program
             return MoveOnlySelfTest();
         if (args.Any(a => string.Equals(a, "--selftest-collconsolidate", StringComparison.OrdinalIgnoreCase)))
             return CollConsolidateSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-potions", StringComparison.OrdinalIgnoreCase)))
+            return PotionsSelfTest();
 
         if (args.Any(a => string.Equals(a, "--selftest-favorites", StringComparison.OrdinalIgnoreCase)))
             return FavoritesSelfTest();
@@ -3189,6 +3191,216 @@ INSERT INTO meta(k,v) VALUES('schema_version','4');");
         {
             W("EXCEPTION: " + ex.Message);
             WriteResultNamed(log, "selftest-collnest-result.txt");
+            return 2;
+        }
+    }
+
+    /// <summary>
+    /// T45/F32 AC: Potions CRUD round-trip, CountForFilter vs Query.Total parity,
+    /// TopSeedableTags minCount/maxFraction exclusion, IsPotionSeeded/MarkPotionSeeded,
+    /// auto-seed idempotency, and all 5 bridge message handlers.
+    /// </summary>
+    private static int PotionsSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder();
+        var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string label, bool cond) { if (!cond) ok = false; W($"  [{(cond ? "ok" : "FAIL")}] {label}"); }
+
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — Potions (T45/F32) self-test");
+            var dbPath = FreshDb("selftest-potions.db");
+            using var db = new LibraryDb(dbPath);
+
+            // Helper: build a minimal image row.
+            static ImageRow Row(string abs, string prompt, string[] tags) => new()
+            {
+                SourceRoot = @"C:\src", RelPath = abs, AbsPath = abs, FileName = abs, Ext = ".png",
+                SizeBytes = 100, MtimeTicks = 1, Width = 512, Height = 768,
+                MetaFormat = "a1111", MetaSource = "embedded",
+                Prompt = prompt, Negative = "", ScannedAt = "2026-06-27",
+                Tags = tags.ToList()
+            };
+
+            // Seed 10 images with 3 tokens of varying frequency:
+            //   "common"              → df 7  (7/10 = 70 % — below 80 % threshold → seedable if ≥ minCount)
+            //   "rare_but_universal"  → df 10 (10/10 = 100 % — above 80 % → excluded as universal)
+            //   "rare"                → df 3  (below minCount 5 → excluded as rare)
+            for (int i = 0; i < 10; i++)
+            {
+                var tags = new List<string> { "rare_but_universal" };
+                if (i < 7) tags.Add("common");
+                if (i < 3) tags.Add("rare");
+                db.Upsert(Row($"img{i}.png", string.Join(", ", tags), tags.ToArray()));
+            }
+            W($"  seeded 10 images; distinct tags: {db.DistinctTagCount()}");
+
+            // ---- (a) CreatePotion + (b) collision + order ----
+            long id1 = db.CreatePotion("Alpha Potion", "common");
+            long id2 = db.CreatePotion("Beta Potion", "rare");
+            long id3 = db.CreatePotion("Gamma Potion", "rare_but_universal");
+            Check("CreatePotion returns positive id", id1 > 0 && id2 > 0 && id3 > 0);
+
+            long dupExact = db.CreatePotion("Alpha Potion", "other");           // exact NOCASE collision
+            Check("CreatePotion exact collision returns -1", dupExact == -1);
+
+            long dupLower = db.CreatePotion("alpha potion", "anything");         // lowercase NOCASE collision
+            Check("CreatePotion NOCASE collision returns -1", dupLower == -1);
+
+            var potions = db.GetPotions();
+            Check("GetPotions count = 3 after collision attempts", potions.Count == 3);
+            Check("GetPotions ORDER BY sort_order,id (ascending id)", potions[0].Id < potions[1].Id && potions[1].Id < potions[2].Id);
+            Check("GetPotions first entry correct", potions[0].Name == "Alpha Potion" && potions[0].Query == "common");
+
+            // ---- (c) UpdatePotion ----
+            bool updated = db.UpdatePotion(id2, "Beta Renamed", "rare, common");
+            Check("UpdatePotion returns true on success", updated);
+            var p2 = db.GetPotions().First(p => p.Id == id2);
+            Check("UpdatePotion persists new name and query", p2.Name == "Beta Renamed" && p2.Query == "rare, common");
+
+            bool collide = db.UpdatePotion(id3, "Alpha Potion", "other");        // collides with id1
+            Check("UpdatePotion collision returns false", !collide);
+            Check("UpdatePotion collision leaves entry unchanged", db.GetPotions().First(p => p.Id == id3).Name == "Gamma Potion");
+
+            // ---- (d) CountForFilter matches Query.Total ----
+            var fCommon = SearchParser.Parse("common");
+            int cntFilter  = db.CountForFilter(fCommon);
+            int cntQuery   = db.Query(fCommon, 0, 1000, false).Total;
+            Check($"CountForFilter('common') matches Query.Total ({cntQuery})", cntFilter == cntQuery && cntFilter == 7);
+
+            var fAnd = SearchParser.Parse("rare, common");   // comma-AND: 3 images have both
+            int cntAnd = db.CountForFilter(fAnd);
+            int cntAndQ = db.Query(fAnd, 0, 1000, false).Total;
+            Check("CountForFilter comma-AND matches Query.Total", cntAnd == cntAndQ && cntAnd == 3);
+
+            var fEmpty = SearchParser.Parse("");             // no filter → all 10
+            Check("CountForFilter empty filter = 10", db.CountForFilter(fEmpty) == 10);
+
+            // ---- (e) DeletePotion ----
+            db.DeletePotion(id3);
+            var after = db.GetPotions();
+            Check("DeletePotion reduces list to 2", after.Count == 2);
+            Check("Deleted potion absent from list", after.All(p => p.Id != id3));
+
+            // ---- (f) TopSeedableTags exclusion ----
+            // minCount=5, maxFraction=0.80, limit=10:
+            //   "common" df=7: 7>=5 AND 7<(10*0.80=8) → INCLUDED
+            //   "rare_but_universal" df=10: 10>=8       → EXCLUDED (universal)
+            //   "rare" df=3: 3<5                        → EXCLUDED (too rare)
+            var seedable = db.TopSeedableTags(minCount: 5, maxFraction: 0.80, limit: 10);
+            W($"  TopSeedableTags(5, 0.80, 10) = [{string.Join(", ", seedable)}]");
+            Check("TopSeedableTags includes 'common' (df=7, seedable)", seedable.Contains("common"));
+            Check("TopSeedableTags excludes 'rare_but_universal' (df=10, ≥80%)", !seedable.Contains("rare_but_universal"));
+            Check("TopSeedableTags excludes 'rare' (df=3, <minCount)", !seedable.Contains("rare"));
+            Check("TopSeedableTags count=1", seedable.Count == 1);
+
+            var noneQualify = db.TopSeedableTags(minCount: 100, maxFraction: 0.80, limit: 10);
+            Check("TopSeedableTags returns empty when minCount too high", noneQualify.Count == 0);
+
+            // ---- (g) IsPotionSeeded / MarkPotionSeeded / auto-seed simulation ----
+            var db2Path = FreshDb("selftest-potions-seed.db");
+            using var db2 = new LibraryDb(db2Path);
+            Check("IsPotionSeeded false on fresh DB", !db2.IsPotionSeeded());
+
+            // popular_tag:     df=10 (100% → above 0.80 threshold → excluded at both 0.80 and 0.99)
+            // near_universal:  df=9  (90% → above 0.80 but below 0.99*10=9.9 → excluded at 0.80, included at 0.99)
+            // uncommon_tag:    df=3  (30% → below minCount=5 → always excluded)
+            for (int i = 0; i < 10; i++)
+            {
+                var t2 = new List<string> { "popular_tag" };
+                if (i < 9) t2.Add("near_universal");
+                if (i < 3) t2.Add("uncommon_tag");
+                db2.Upsert(Row($"s{i}.png", string.Join(", ", t2), t2.ToArray()));
+            }
+            // At minCount=5, maxFraction=0.80 (threshold=8): popular_tag df=10 ≥ 8 excluded,
+            // near_universal df=9 ≥ 8 excluded, uncommon_tag df=3 < 5 excluded → nothing qualifies.
+            var emptyTags = db2.TopSeedableTags(minCount: 5, maxFraction: 0.80, limit: 10);
+            Check("Auto-seed: empty TopSeedableTags (all universal) does NOT mark seeded", emptyTags.Count == 0 && !db2.IsPotionSeeded());
+
+            // At maxFraction=0.99 (threshold=9.9): near_universal df=9 < 9.9 AND ≥ 5 → included.
+            var seedTags = db2.TopSeedableTags(minCount: 5, maxFraction: 0.99, limit: 10);
+            Check("TopSeedableTags with 0.99 fraction finds 'near_universal'", seedTags.Contains("near_universal"));
+            foreach (var tag in seedTags) db2.CreatePotion(tag, tag);
+            db2.MarkPotionSeeded();
+            Check("IsPotionSeeded true after MarkPotionSeeded", db2.IsPotionSeeded());
+            Check("Potions created for each seedable tag", db2.GetPotions().Count == seedTags.Count);
+
+            // ---- (h) Re-run: idempotency — collision returns -1, list unchanged ----
+            int beforeCount = db2.GetPotions().Count;
+            int collisions = seedTags.Count(tag => db2.CreatePotion(tag, tag) == -1);
+            Check("All re-seeded CreatePotion calls return -1 (idempotent)", collisions == seedTags.Count);
+            Check("Potion count unchanged after duplicate attempts", db2.GetPotions().Count == beforeCount);
+            Check("IsPotionSeeded still true", db2.IsPotionSeeded());
+
+            // ---- Bridge integration tests ----
+            // db now has id1 (Alpha Potion/common) and id2 (Beta Renamed/rare, common) — 2 potions.
+            var bridge = new GalleryBridge(db, r => $"https://t/{r.Id}");
+
+            // {type:'potions'} → list with live counts
+            var potReply = bridge.Handle("{\"type\":\"potions\"}");
+            Check("potions reply: type=potions", potReply?.Contains("\"type\":\"potions\"") == true);
+            using (var pd = System.Text.Json.JsonDocument.Parse(potReply!))
+            {
+                var items2 = pd.RootElement.GetProperty("items");
+                Check("potions reply: 2 items", items2.GetArrayLength() == 2);
+                var first = items2[0];
+                Check("potions reply item has id, name, query, count fields",
+                    first.TryGetProperty("id", out _) && first.TryGetProperty("name", out _) &&
+                    first.TryGetProperty("query", out _) && first.TryGetProperty("count", out _));
+                // Alpha Potion query="common" → 7 images
+                int alphaCount = items2.EnumerateArray()
+                    .FirstOrDefault(x => x.GetProperty("name").GetString() == "Alpha Potion")
+                    .GetProperty("count").GetInt32();
+                Check("potions reply: Alpha Potion count=7", alphaCount == 7);
+            }
+
+            // {type:'potcreate'} → creates + returns list
+            var createReply = bridge.Handle("{\"type\":\"potcreate\",\"name\":\"Bridge Potion\",\"query\":\"common\"}");
+            Check("potcreate: returns potions type", createReply?.Contains("\"type\":\"potions\"") == true);
+
+            // {type:'potcreate'} collision → poterror
+            var collideReply = bridge.Handle("{\"type\":\"potcreate\",\"name\":\"Bridge Potion\",\"query\":\"other\"}");
+            Check("potcreate collision: returns poterror", collideReply?.Contains("\"type\":\"poterror\"") == true);
+
+            // {type:'potcount'} → count + echo
+            var countReply = bridge.Handle("{\"type\":\"potcount\",\"query\":\"common\"}");
+            Check("potcount: type=potcount", countReply?.Contains("\"type\":\"potcount\"") == true);
+            using (var cd = System.Text.Json.JsonDocument.Parse(countReply!))
+            {
+                Check("potcount: echoes query", cd.RootElement.GetProperty("query").GetString() == "common");
+                Check("potcount: count=7", cd.RootElement.GetProperty("count").GetInt32() == 7);
+            }
+
+            // {type:'potupdate'} — get Bridge Potion id first
+            var listNow = bridge.Handle("{\"type\":\"potions\"}");
+            using var listDoc = System.Text.Json.JsonDocument.Parse(listNow!);
+            var bridgePotEl = listDoc.RootElement.GetProperty("items").EnumerateArray()
+                .FirstOrDefault(x => x.GetProperty("name").GetString() == "Bridge Potion");
+            long bridgePotId = bridgePotEl.GetProperty("id").GetInt64();
+
+            var updateReply = bridge.Handle($"{{\"type\":\"potupdate\",\"id\":{bridgePotId},\"name\":\"Updated Bridge\",\"query\":\"rare\"}}");
+            Check("potupdate: returns potions type", updateReply?.Contains("\"type\":\"potions\"") == true);
+
+            // {type:'potdelete'} → removes + returns list
+            var deleteReply = bridge.Handle($"{{\"type\":\"potdelete\",\"id\":{bridgePotId}}}");
+            Check("potdelete: returns potions type", deleteReply?.Contains("\"type\":\"potions\"") == true);
+            using (var dd = System.Text.Json.JsonDocument.Parse(deleteReply!))
+            {
+                Check("potdelete: 2 items remain (back to pre-create count)",
+                    dd.RootElement.GetProperty("items").GetArrayLength() == 2);
+            }
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL");
+            WriteResultNamed(log, "selftest-potions-result.txt");
+            return ok ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            W("RESULT: FAIL (exception)");
+            W(ex.ToString());
+            WriteResultNamed(log, "selftest-potions-result.txt");
             return 2;
         }
     }

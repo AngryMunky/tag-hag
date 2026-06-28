@@ -44,6 +44,12 @@ public sealed class GalleryBridge
                 "cols" => HandleCols(),
                 "folders" => HandleFolders(),
                 "optimizepreview" => HandleOptimizePreview(root),
+                // T45/F32 Potions — stateless synchronous reads + writes; all reply inline.
+                "potions"   => HandlePotions(),
+                "potcreate" => HandlePotCreate(root),
+                "potupdate" => HandlePotUpdate(root),
+                "potdelete" => HandlePotDelete(root),
+                "potcount"  => HandlePotCount(root),
                 _ => null
             };
         }
@@ -274,6 +280,52 @@ public sealed class GalleryBridge
         }
         var suggestions = res.Suggestions.Select(s => new { token = s.Token, votes = s.Votes });
         return JsonSerializer.Serialize(new { type = "autotag", gen, id, suggestions, neighbors }, Json);
+    }
+
+    // ---- T45/F32 Potions ---- all handlers are synchronous (no background job; stateless writes). ----
+
+    private string HandlePotions()
+    {
+        var potions = _db.GetPotions();
+        var items = potions.Select(p => new
+        {
+            id = p.Id, name = p.Name, query = p.Query,
+            count = _db.CountForFilter(SearchParser.Parse(p.Query))
+        });
+        return JsonSerializer.Serialize(new { type = "potions", items }, Json);
+    }
+
+    private string HandlePotCreate(JsonElement root)
+    {
+        var name  = root.TryGetProperty("name",  out var n) ? n.GetString() ?? "" : "";
+        var query = root.TryGetProperty("query", out var q) ? q.GetString() ?? "" : "";
+        var newId = _db.CreatePotion(name, query);
+        if (newId == -1)
+            return JsonSerializer.Serialize(new { type = "poterror", message = $"A Potion named \"{name.Trim()}\" already exists." }, Json);
+        return HandlePotions();
+    }
+
+    private string HandlePotUpdate(JsonElement root)
+    {
+        if (!root.TryGetProperty("id", out var idEl)) return HandlePotions();
+        var name  = root.TryGetProperty("name",  out var n) ? n.GetString() ?? "" : "";
+        var query = root.TryGetProperty("query", out var q) ? q.GetString() ?? "" : "";
+        if (!_db.UpdatePotion(idEl.GetInt64(), name, query))
+            return JsonSerializer.Serialize(new { type = "poterror", message = $"A Potion named \"{name.Trim()}\" already exists." }, Json);
+        return HandlePotions();
+    }
+
+    private string HandlePotDelete(JsonElement root)
+    {
+        if (root.TryGetProperty("id", out var idEl)) _db.DeletePotion(idEl.GetInt64());
+        return HandlePotions();
+    }
+
+    private string HandlePotCount(JsonElement root)
+    {
+        var query = root.TryGetProperty("query", out var q) ? q.GetString() ?? "" : "";
+        var count = _db.CountForFilter(SearchParser.Parse(query));
+        return JsonSerializer.Serialize(new { type = "potcount", query, count }, Json);
     }
 
     private static readonly Regex LoraRx =

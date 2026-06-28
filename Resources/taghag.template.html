@@ -213,7 +213,6 @@
   #scanoverlay .scanpct{font:600 12px Inter,system-ui,sans-serif;color:var(--acid);margin-top:8px;min-height:15px}
   #scanoverlay .scanbtn{margin-top:16px;padding:7px 18px;border:1px solid #4a4356;border-radius:999px;background:#2b2a33;color:#d8d0bf;font:600 12px Inter,system-ui,sans-serif;cursor:pointer}
   #scanoverlay .scanbtn:hover{background:#3a3344;color:#ece5d6}
-  #folsub.on,#colsub.on{color:var(--acid);background:rgba(164,255,106,.10)}
   #colpick,#movepick,#moremenu{position:absolute;bottom:66px;left:50%;transform:translateX(-50%);min-width:240px;max-height:300px;overflow:auto;
     background:rgba(24,18,32,.98);backdrop-filter:blur(14px);border:1px solid #362a4c;border-radius:11px;
     box-shadow:0 16px 44px rgba(0,0,0,.6);z-index:13;display:none;padding:5px 0}
@@ -241,6 +240,61 @@
   .atneigh{width:72px}
   .atneigh img{width:72px;height:60px;object-fit:cover;border-radius:8px;background:#26222e;border:1px solid var(--border);display:block}
   .atneigh .d{font-size:10px;color:var(--mut2);text-align:center;margin-top:2px}
+
+  /* T46/F32 — Potions sidebar rows */
+  .potrow .act{display:none;gap:2px;align-items:center}
+  .potrow:hover .act{display:inline-flex}
+  .potrow .act span{cursor:pointer;color:#8b8195;font-size:11px;padding:0 3px}
+  .potrow .act span:hover{color:#ece5d6}
+  /* Save-as-Potion button (search bar trailing area) */
+  #pot-save{display:none;align-items:center;gap:4px;padding:4px 10px;border-radius:7px;font-size:12px;
+    font-weight:600;cursor:pointer;border:1px solid rgba(164,255,106,.38);background:rgba(164,255,106,.1);
+    color:#a8d88a;white-space:nowrap;font-family:Inter,sans-serif;flex:none}
+  #pot-save:hover{background:rgba(164,255,106,.2);color:#cfe9b3}
+  /* Potion-active strip (replaces searchbox when a Potion is active) */
+  #pot-active-strip{display:none;align-items:center;gap:8px;background:rgba(164,255,106,.1);
+    border:1px solid rgba(164,255,106,.35);border-radius:9px;padding:7px 11px;cursor:pointer;width:100%}
+  #pot-active-name{flex:1;font-size:13px;color:#cfe9b3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #pot-active-clear{color:var(--mut2);cursor:pointer;font-size:14px;padding:0 2px;flex:none}
+  #pot-active-clear:hover{color:var(--red)}
+  /* Potion dialog */
+  #pot-dialog{position:fixed;inset:0;background:rgba(8,6,12,.72);z-index:55;display:none;align-items:center;justify-content:center}
+  #pot-dialog.open{display:flex}
+  .potbox{width:480px;max-width:calc(100% - 40px);background:var(--panel);border:1px solid #362a4c;
+    border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.6);padding:20px 22px}
+  .pothead{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+  .pothead>span:first-child{font-size:16px;color:#ece5d6}
+  #pot-close{cursor:pointer;color:#8b8195;font-size:16px}
+  #pot-close:hover{color:#ece5d6}
+  .pot-label{font-size:10.5px;font-weight:600;letter-spacing:1.1px;text-transform:uppercase;color:#5d5568;margin:14px 0 6px}
+  #pot-name{width:100%;background:var(--input);border:1px solid var(--border);border-radius:8px;
+    padding:8px 11px;color:var(--bone);font-size:13px;outline:none;font-family:Inter,sans-serif}
+  #pot-name:focus{border-color:var(--acid)}
+  #pot-ingredients-wrap{background:var(--input);border:1px solid var(--border);border-radius:9px;
+    padding:8px 10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:40px;cursor:text}
+  #pot-ingredients-wrap:focus-within{border-color:var(--acid)}
+  #pot-ing-add{flex:1;min-width:80px;background:transparent;border:none;outline:none;color:var(--bone);
+    font-size:12.5px;font-family:Inter,sans-serif;padding:2px 0}
+  #pot-count-row{margin-top:8px;font-size:12px;color:var(--mut2)}
+  #pot-count-row span{color:var(--acid);font-variant-numeric:tabular-nums}
+  #pot-error{margin-top:8px;font-size:12px;color:var(--rose);padding:7px 10px;border-radius:8px;
+    background:rgba(214,138,160,.1);border:1px solid rgba(214,138,160,.3);display:none}
+  .pot-actions{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
+  .pot-actions button{padding:8px 16px;border-radius:9px;font-size:13px;font-weight:600;
+    cursor:pointer;font-family:Inter,sans-serif;border:1px solid transparent}
+  #pot-save-btn{background:rgba(164,255,106,.16);border-color:rgba(164,255,106,.4);color:#cfe9b3}
+  #pot-save-btn:hover{background:rgba(164,255,106,.26)}
+  #pot-cancel-btn{background:var(--input);border-color:var(--border);color:#b3a9c0}
+  #pot-cancel-btn:hover{color:#ece5d6}
+  /* Undo toast */
+  #pot-undo{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
+    align-items:center;gap:12px;padding:10px 18px;background:rgba(22,16,28,.95);
+    backdrop-filter:blur(12px);border:1px solid #362a4c;border-radius:999px;
+    box-shadow:0 10px 30px rgba(0,0,0,.5);z-index:14;white-space:nowrap;font-size:13px;
+    color:var(--bone);display:none}
+  #pot-undo.open{display:flex}
+  #pot-undo-link{color:var(--acid);cursor:pointer;font-weight:600}
+  #pot-undo-link:hover{text-decoration:underline}
 
   /* right-click menu */
   #ctx{position:fixed;display:none;width:214px;padding:5px 0 6px;background:rgba(24,18,32,.97);backdrop-filter:blur(14px);
@@ -292,13 +346,19 @@
     </nav>
 
     <div class="navhead" style="display:flex;align-items:center;justify-content:space-between">
-      <span>Collections</span><span style="display:flex;gap:2px"><span class="colnewbtn" id="colnew" title="New top-level collection">＋ New</span><span class="colnewbtn" id="colsub" title="Include images from sub-collections when a collection is selected">⊞ Sub-collections</span></span>
+      <span>Collections</span><span class="colnewbtn" id="colnew" title="New top-level collection">＋ New</span>
     </div>
     <nav id="colnav"></nav>
     <div class="v2note" id="colempty">No collections yet — create one with ＋ New, then drag images in.</div>
 
     <div class="navhead" style="display:flex;align-items:center;justify-content:space-between">
-      <span>Folders</span><span style="display:flex;gap:2px"><span class="colnewbtn" id="folnew" title="New folder (under the selected folder, or a source root)">＋</span><span class="colnewbtn" id="folsub" title="Include images from subfolders when a folder is selected">⊞ Subfolders</span></span>
+      <span>Potions</span><span class="colnewbtn" id="potnew" title="New Potion from scratch">＋ New</span>
+    </div>
+    <nav id="potnav"></nav>
+    <div class="v2note" id="potempty">No potions yet — save a search or Scan to brew your first.</div>
+
+    <div class="navhead" style="display:flex;align-items:center;justify-content:space-between">
+      <span>Folders</span><span class="colnewbtn" id="folnew" title="New folder (under the selected folder, or a source root)">＋ New</span>
     </div>
     <nav id="folnav"></nav>
     <div class="v2note" id="folempty">No folders yet — Scan a source folder.</div>
@@ -319,6 +379,12 @@
         <div id="searchbox">
           <span class="mag">⌕</span>
           <input id="search" autocomplete="off" spellcheck="false" placeholder="Search the hoard — comma = AND, &quot;quotes&quot; = exact phrase" />
+          <button id="pot-save" title="Save this search as a Potion">🧪 Save</button>
+        </div>
+        <div id="pot-active-strip" title="Potion active — click to edit search freely">
+          <span class="mag">🧪</span>
+          <span id="pot-active-name"></span>
+          <span id="pot-active-clear" title="Exit Potion · reset to All">✕</span>
         </div>
         <div id="ac"></div>
       </div>
@@ -453,6 +519,29 @@
   </div>
 </div>
 
+<!-- T46/F32 Potion dialog (create / edit) -->
+<div id="pot-dialog">
+  <div class="potbox">
+    <div class="pothead"><span class="cinzel" id="pot-title">New Potion</span><span id="pot-close" title="Close">✕</span></div>
+    <div class="pot-label">Name</div>
+    <input id="pot-name" maxlength="80" autocomplete="off" spellcheck="false" placeholder="e.g. Portraits, Fantasy Landscapes…" />
+    <div class="pot-label">Ingredients (search query)</div>
+    <div id="pot-ingredients-wrap">
+      <div id="pot-ingredients" class="chips"></div>
+      <input id="pot-ing-add" autocomplete="off" spellcheck="false" placeholder="Add a term, Enter or comma to confirm…" />
+    </div>
+    <div id="pot-count-row">Results: <span id="pot-count">~</span></div>
+    <div id="pot-error"></div>
+    <div class="pot-actions">
+      <button id="pot-cancel-btn">Cancel</button>
+      <button id="pot-save-btn">🧪 Brew it</button>
+    </div>
+  </div>
+</div>
+
+<!-- T46/F32 delete-undo toast -->
+<div id="pot-undo">Potion deleted — <span id="pot-undo-link">Undo</span></div>
+
 <!-- right-click menu -->
 <div id="ctx">
   <div id="ctxname"><span class="dot">◆</span><span id="ctxnametext"></span></div>
@@ -487,18 +576,28 @@
   let sel=new Set(), lastIdx=-1;
   let dupeMode=false, nearDupes=false;
   const TITLES={all:'All Images',unsorted:'Unsorted',bog:'The Bog',dupes:'Duplicates',favorites:'Favorites',optimized:'Optimized'};
+  // T46/F32 Potions state
+  let activePotion=null;                            // {pid,name,query} or null when no Potion is active
+  let potDialogMode='create',potDialogPid=null;
+  let potChips=[];
+  let potCountTimer=null,potUndoTimer=null,potUndoData=null;
 
   function post(m){ if(window.chrome&&window.chrome.webview) window.chrome.webview.postMessage(JSON.stringify(m)); }
   function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
   function flags(){ if(scope==='unsorted')return{untaggedOnly:true}; if(scope==='bog')return{archivedOnly:true};
     if(scope==='favorites')return{favoritesOnly:true}; if(scope==='optimized')return{optimizedOnly:true}; if(scope==='col')return{collectionId:currentCid,includeSubcollections:collSubtree};
     if(scope==='folder')return{folderPath:currentFolderPath, folderRoot:currentFolderRoot, includeSubfolders:folderSubtree}; return {}; }
+  function deactivatePotionSilent(){ if(!activePotion)return; activePotion=null;
+    $('#searchbox').style.display=''; $('#pot-active-strip').style.display='none';
+    document.querySelectorAll('#potnav .potrow').forEach(r=>r.classList.remove('on')); }
+  function updatePotSave(){ $('#pot-save').style.display=(!activePotion&&raw.trim().length>0)?'flex':'none'; }
   function resetGrid(){ gen++; loading=false; grid.innerHTML=''; loaded=[]; page=0; total=0; exhausted=false; clearSel(); emptyMsg.style.display='none'; panelIdx=-1; showPanelEmpty(); }
   function requestPage(){ if(loading||exhausted)return; loading=true; post({type:'query',raw,page,size:SIZE,gen,...flags()}); }
   function refresh(){ resetGrid(); requestPage(); post({type:'counts'}); }
 
   // ---- sidebar nav ----
   document.querySelectorAll('#libnav .navrow[data-scope]').forEach(row=>row.onclick=()=>{
+    deactivatePotionSilent();
     scope=row.dataset.scope; currentCid=null; currentFolderPath=null; currentFolderRoot=null;
     document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.toggle('on',r===row));
     document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.remove('on'));   // clear collection highlight
@@ -529,6 +628,7 @@
     for(let i=0;i<s.length;i++){const c=s[i];if(c==='"')q=!q;else if(c===','&&!q)start=i+1;}return s.slice(start).trim();}
   let acTimer=null;
   search.addEventListener('input',()=>{ if(dupeMode) exitDupes(); raw=search.value;resetGrid();requestPage();
+    updatePotSave();
     clearTimeout(acTimer);acTimer=setTimeout(()=>{const t=currentTerm();if(t.length>0&&!t.includes('"'))post({type:'ac',prefix:t});else hideAc();},75);});
   search.addEventListener('keydown',e=>{
     if(acBox.style.display==='block'&&acItems.length){
@@ -536,7 +636,7 @@
       if(e.key==='ArrowUp'){acSel=(acSel-1+acItems.length)%acItems.length;paintAc();e.preventDefault();return;}
       if(e.key==='Tab'){applyAc(acSel<0?0:acSel);e.preventDefault();return;}}
     if(e.key==='Enter'){hideAc();raw=search.value;resetGrid();requestPage();}
-    if(e.key==='Escape'){if(acBox.style.display==='block')hideAc();else{search.value='';raw='';resetGrid();requestPage();}}});
+    if(e.key==='Escape'){if(acBox.style.display==='block')hideAc();else{search.value='';raw='';updatePotSave();resetGrid();requestPage();}}});
   function applyAc(i){const tok=acItems[i].token;const s=search.value;let q=false,start=0;
     for(let k=0;k<s.length;k++){const c=s[k];if(c==='"')q=!q;else if(c===','&&!q)start=k+1;}
     search.value=s.slice(0,start)+(start>0?' ':'')+tok+', ';hideAc();raw=search.value;resetGrid();requestPage();search.focus();}
@@ -861,7 +961,7 @@
       const cnt=document.createElement('span'); cnt.className='cnt';
       cnt.textContent=collSubtree?n.countRecursive:n.count;
       right.appendChild(act); right.appendChild(cnt); row.appendChild(right);
-      row.onclick=()=>{ scope='col'; currentCid=n.id; currentFolderPath=null; currentFolderRoot=null; dupeMode=false; $('#dupctl').style.display='none'; $('#cnt-dupes').textContent='';
+      row.onclick=()=>{ deactivatePotionSilent(); scope='col'; currentCid=n.id; currentFolderPath=null; currentFolderRoot=null; dupeMode=false; $('#dupctl').style.display='none'; $('#cnt-dupes').textContent='';
         document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.remove('on'));
         document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.toggle('on',r===row));
         document.querySelectorAll('#folnav .navrow').forEach(r=>r.classList.remove('on'));
@@ -890,7 +990,7 @@
   // ---- folders sidebar (T33/F24): physical-folder navigation, derived from the index ----
   let foldersCache=[];
   function folderExists(root,path){ let f=false; const w=ns=>ns.forEach(n=>{ if(n.root===root&&n.path===path)f=true; if(n.children)w(n.children); }); w(foldersCache); return f; }
-  function gotoAll(){ scope='all'; currentCid=null; currentFolderPath=null; currentFolderRoot=null;
+  function gotoAll(){ deactivatePotionSilent(); scope='all'; currentCid=null; currentFolderPath=null; currentFolderRoot=null;
     document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.toggle('on',r.dataset.scope==='all'));
     document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.remove('on'));
     document.querySelectorAll('#folnav .navrow').forEach(r=>r.classList.remove('on'));
@@ -915,7 +1015,7 @@
         act.appendChild(ed); right.appendChild(act); }
       const cnt=document.createElement('span'); cnt.className='cnt'; cnt.textContent=n.count; right.appendChild(cnt);
       row.appendChild(right);
-      row.onclick=()=>{ scope='folder'; currentFolderRoot=n.root; currentFolderPath=n.path; currentCid=null; dupeMode=false;
+      row.onclick=()=>{ deactivatePotionSilent(); scope='folder'; currentFolderRoot=n.root; currentFolderPath=n.path; currentCid=null; dupeMode=false;
         $('#dupctl').style.display='none'; $('#cnt-dupes').textContent='';
         document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.remove('on'));
         document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.remove('on'));
@@ -927,8 +1027,6 @@
     walk(foldersCache,0);
     if(sb) sb.scrollTop=sp;   // preserve sidebar scroll across the rebuild — a scan/rename reload shouldn't jump the list
   }
-  $('#folsub').onclick=()=>{ folderSubtree=!folderSubtree; $('#folsub').classList.toggle('on',folderSubtree); if(scope==='folder') refresh(); };
-  $('#colsub').onclick=()=>{ collSubtree=!collSubtree; $('#colsub').classList.toggle('on',collSubtree); renderColNav(colsTree); if(scope==='col') refresh(); };
 
   // ---- auto-tag (T27): suggest-only, gen-guarded modal ----
   let atGen=0, atTargetId=null; const atModal=$('#autotag-modal');
@@ -950,6 +1048,103 @@
     neigh.forEach(n=>{ const d=document.createElement('div'); d.className='atneigh';
       const img=document.createElement('img'); img.loading='lazy'; img.src='https://thumb.local/'+n.id; img.onerror=()=>{img.src=n.url;};
       d.appendChild(img); const cap=document.createElement('div'); cap.className='d'; cap.textContent='Δ'+n.distance; d.appendChild(cap); nb.appendChild(d); }); }
+
+  // ---- T46/F32 Potions sidebar + dialog + undo toast ----
+  function parsePotQuery(q){ const out=[]; let cur='',inQ=false;
+    for(const c of (q||'')){
+      if(c==='"'){inQ=!inQ;cur+=c;}
+      else if(c===','&&!inQ){if(cur.trim())out.push(cur.trim());cur='';}
+      else cur+=c;}
+    if(cur.trim())out.push(cur.trim()); return out; }
+  function buildPotQuery(){ return potChips.join(', '); }
+  function renderPotChips(){ const w=$('#pot-ingredients'); w.innerHTML='';
+    potChips.forEach((t,i)=>{ const c=document.createElement('span'); c.className='chip';
+      const tx=document.createElement('span'); tx.textContent=t; c.appendChild(tx);
+      const x=document.createElement('span'); x.className='x'; x.textContent='✕';
+      x.onclick=()=>{ potChips.splice(i,1); renderPotChips(); schedulePotCount(); }; c.appendChild(x); w.appendChild(c); });
+    updateBrewBtn(); }
+  function updateBrewBtn(){ $('#pot-save-btn').disabled=!($('#pot-name').value.trim())||potChips.length===0; }
+  function schedulePotCount(){ clearTimeout(potCountTimer); potCountTimer=setTimeout(()=>{
+    const q=buildPotQuery(); if(q.trim()) post({type:'potcount',query:q}); else $('#pot-count').textContent='—'; },150); }
+  function renderPotNav(items){ const nav=$('#potnav'); nav.innerHTML='';
+    $('#potempty').style.display=items.length?'none':'block';
+    items.forEach(p=>{
+      const row=document.createElement('div');
+      row.className='navrow potrow'+(activePotion&&activePotion.pid===p.id?' on':'');
+      row.dataset.pid=p.id;
+      const label=document.createElement('span'); label.className='l';
+      const ico=document.createElement('span'); ico.className='ico'; ico.textContent='🧪';
+      label.appendChild(ico); label.appendChild(document.createTextNode(p.name));
+      row.appendChild(label);
+      const right=document.createElement('span'); right.style.cssText='display:flex;align-items:center;gap:4px';
+      const act=document.createElement('span'); act.className='act';
+      const ed=document.createElement('span'); ed.textContent='✎'; ed.title='Edit Potion';
+      ed.onclick=e=>{ e.stopPropagation(); openPotDialog('edit',p.id,p.name,p.query); };
+      const del=document.createElement('span'); del.textContent='✕'; del.title='Delete Potion';
+      del.onclick=e=>{ e.stopPropagation(); deletePot(p.id,p.name,p.query); };
+      act.appendChild(ed); act.appendChild(del);
+      const cnt=document.createElement('span'); cnt.className='cnt';
+      cnt.textContent=p.count!=null?Number(p.count).toLocaleString():'';
+      right.appendChild(act); right.appendChild(cnt); row.appendChild(right);
+      row.onclick=()=>activatePotion(p.id,p.name,p.query);
+      nav.appendChild(row); }); }
+  function activatePotion(pid,name,query){ activePotion={pid,name,query}; raw=query; hideAc();
+    scope='all'; currentCid=null; currentFolderPath=null; currentFolderRoot=null; dupeMode=false;
+    $('#dupctl').style.display='none'; $('#cnt-dupes').textContent='';
+    document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.remove('on'));
+    document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.remove('on'));
+    document.querySelectorAll('#folnav .navrow').forEach(r=>r.classList.remove('on'));
+    document.querySelectorAll('#potnav .potrow').forEach(r=>r.classList.toggle('on',Number(r.dataset.pid)===pid));
+    $('#searchbox').style.display='none'; $('#pot-active-strip').style.display='flex';
+    $('#pot-active-name').textContent=name; $('#pot-save').style.display='none';
+    $('#viewtitle').textContent=name; refresh(); }
+  function clearPotion(preloadSearch){ const prev=activePotion; activePotion=null;
+    $('#searchbox').style.display=''; $('#pot-active-strip').style.display='none';
+    document.querySelectorAll('#potnav .potrow').forEach(r=>r.classList.remove('on'));
+    if(preloadSearch&&prev){ search.value=prev.query; raw=prev.query; }
+    else { search.value=''; raw=''; }
+    scope='all'; currentCid=null; currentFolderPath=null; currentFolderRoot=null;
+    document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.toggle('on',r.dataset.scope==='all'));
+    document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.remove('on'));
+    document.querySelectorAll('#folnav .navrow').forEach(r=>r.classList.remove('on'));
+    $('#viewtitle').textContent='All Images'; updatePotSave(); refresh(); }
+  $('#potnew').onclick=()=>openPotDialog('create',null,'','');
+  $('#pot-active-clear').onclick=e=>{ e.stopPropagation(); clearPotion(false); };
+  $('#pot-active-strip').onclick=()=>clearPotion(true);
+  // ---- Potion dialog ----
+  function openPotDialog(mode,pid,name,query){ potDialogMode=mode; potDialogPid=pid||null;
+    $('#pot-title').textContent=mode==='edit'?'Edit Potion':'New Potion';
+    $('#pot-save-btn').textContent=mode==='edit'?'🧪 Update it':'🧪 Brew it';
+    $('#pot-name').value=name||''; potChips=parsePotQuery(query||''); renderPotChips();
+    $('#pot-ing-add').value=''; $('#pot-error').style.display='none';
+    $('#pot-count').textContent='~'; $('#pot-dialog').classList.add('open');
+    setTimeout(()=>$('#pot-name').focus(),40); schedulePotCount(); }
+  function closePotDialog(){ $('#pot-dialog').classList.remove('open'); }
+  $('#pot-close').onclick=closePotDialog;
+  $('#pot-cancel-btn').onclick=closePotDialog;
+  $('#pot-dialog').addEventListener('click',e=>{ if(e.target.id==='pot-dialog') closePotDialog(); });
+  $('#pot-ingredients-wrap').onclick=e=>{ if(!e.target.closest('.chip')) $('#pot-ing-add').focus(); };
+  $('#pot-name').addEventListener('input',updateBrewBtn);
+  const potIngAdd=$('#pot-ing-add');
+  potIngAdd.addEventListener('keydown',e=>{
+    if(e.key==='Enter'||e.key===','){e.preventDefault();
+      const t=potIngAdd.value.trim().replace(/,\s*$/,'');
+      if(t){ potChips.push(t); potIngAdd.value=''; renderPotChips(); schedulePotCount(); } }
+    else if(e.key==='Backspace'&&!potIngAdd.value&&potChips.length){
+      potChips.pop(); renderPotChips(); schedulePotCount(); } });
+  $('#pot-save-btn').onclick=()=>{ const name=($('#pot-name').value||'').trim();
+    if(!name){ $('#pot-name').focus(); return; }
+    if(potDialogMode==='create') post({type:'potcreate',name,query:buildPotQuery()});
+    else post({type:'potupdate',id:potDialogPid,name,query:buildPotQuery()}); };
+  $('#pot-save').onclick=()=>openPotDialog('create',null,'',raw);
+  // ---- delete + undo toast ----
+  function deletePot(pid,name,query){ if(activePotion&&activePotion.pid===pid) clearPotion(false);
+    post({type:'potdelete',id:pid}); potUndoData={name,query}; clearTimeout(potUndoTimer);
+    const toast=$('#pot-undo'); toast.classList.add('open');
+    potUndoTimer=setTimeout(()=>{ toast.classList.remove('open'); potUndoData=null; },5000); }
+  $('#pot-undo-link').onclick=()=>{ if(!potUndoData)return; clearTimeout(potUndoTimer);
+    post({type:'potcreate',name:potUndoData.name,query:potUndoData.query});
+    $('#pot-undo').classList.remove('open'); potUndoData=null; };
 
   // ---- T36/F26 import/scan progress overlay (over #gridwrap; sidebar + top bar stay usable) ----
   const scanOv=$('#scanoverlay'), scanFill=$('#scanbarfill'), scanPhaseEl=$('#scanphase'), scanPctEl=$('#scanpct');
@@ -974,7 +1169,8 @@
     if(document.activeElement===search) return;
     if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='a'){ selectAllView(); e.preventDefault(); }   // T40/F28 — whole view, not just loaded
     else if(e.key==='Escape'){ if(ctx.style.display==='block')hideCtx(); else if(sel.size)clearSel(); }
-    else if(e.key==='Delete'||e.key==='Backspace'){ if(sel.size){ doOp('delete'); e.preventDefault(); } } });
+    else if(e.key==='Delete'||e.key==='Backspace'){ if(sel.size){ doOp('delete'); e.preventDefault(); } }
+    else if(e.key==='/'&&activePotion&&!$('#pot-dialog').classList.contains('open')){ clearPotion(true); e.preventDefault(); } });
 
   // ---- empty state ----
   function showEmpty(){ const q=search.value.trim(); const btn=$('#emptybtn');
@@ -1013,10 +1209,13 @@
       else emptyMsg.style.display='none'; }
     else if(m.type==='inspect'){ if(m.target==='lightbox') showLb(m); else showPanel(m); }
     else if(m.type==='reload'){ raw=search.value; if(dupeMode) runDupes(); else refresh(); post({type:'folders'}); }
-    else if(m.type==='status'){ countEl.textContent=m.text; } });
+    else if(m.type==='status'){ countEl.textContent=m.text; }
+    else if(m.type==='potions'){ renderPotNav(m.items||[]); if($('#pot-dialog').classList.contains('open')) closePotDialog(); }
+    else if(m.type==='potcount'){ $('#pot-count').textContent=m.count!=null?Number(m.count).toLocaleString():'—'; }
+    else if(m.type==='poterror'){ const er=$('#pot-error'); er.textContent=m.message||'Error'; er.style.display='block'; } });
 
   new IntersectionObserver(es=>{ if(es[0].isIntersecting) requestPage(); },{root:scroll,rootMargin:'400px'}).observe($('#sentinel'));
-  requestPage(); post({type:'counts'}); post({type:'cols'}); post({type:'folders'});   // T28 Collections + T33 Folders sidebar
+  requestPage(); post({type:'counts'}); post({type:'cols'}); post({type:'folders'}); post({type:'potions'});   // T28/T33 sidebars + F32 Potions
 })();
 </script>
 </body>

@@ -164,7 +164,20 @@ CREATE TABLE IF NOT EXISTS collection_items (
   image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
   PRIMARY KEY (collection_id, image_id)
 );
-CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_id);");
+CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_id);
+
+-- ===== v2.4 (additive) — Potions (saved searches / F32) =====
+-- New table: CREATE IF NOT EXISTS handles both fresh DBs and upgrades from v5.
+-- No ALTER needed on existing tables; Migrate() is NOT changed; SchemaVersion stays 5.
+CREATE TABLE IF NOT EXISTS potions (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT    NOT NULL COLLATE NOCASE,
+  query      TEXT    NOT NULL,
+  created_at TEXT    NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(name COLLATE NOCASE)
+);
+CREATE INDEX IF NOT EXISTS ix_potions_sort ON potions(sort_order, id);");
     }
 
     private void Migrate()
@@ -1133,6 +1146,84 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
         }
         tx.Commit();
     }
+
+    // ==================== v2.4 Potions (saved searches / F32) ====================
+
+    /// <summary>All saved Potions, ordered by sort_order then id (sidebar display order).</summary>
+    public IReadOnlyList<PotionRow> GetPotions()
+    {
+        var list = new List<PotionRow>();
+        using var cmd = _con.CreateCommand();
+        cmd.CommandText = "SELECT id, name, query, created_at, sort_order FROM potions ORDER BY sort_order, id;";
+        using var rd = cmd.ExecuteReader();
+        while (rd.Read())
+            list.Add(new PotionRow { Id = rd.GetInt64(0), Name = rd.GetString(1), Query = rd.GetString(2), CreatedAt = rd.GetString(3), SortOrder = rd.GetInt32(4) });
+        return list;
+    }
+
+    /// <summary>Create a Potion. Returns the new id, or -1 on NOCASE name collision.</summary>
+    public long CreatePotion(string name, string query)
+    {
+        try
+        {
+            using var cmd = _con.CreateCommand();
+            cmd.CommandText = "INSERT INTO potions(name, query, created_at) VALUES($n,$q,$t); SELECT last_insert_rowid();";
+            cmd.Parameters.AddWithValue("$n", (name ?? "").Trim());
+            cmd.Parameters.AddWithValue("$q", query ?? "");
+            cmd.Parameters.AddWithValue("$t", DateTime.Now.ToString("s"));
+            return Convert.ToInt64(cmd.ExecuteScalar());
+        }
+        catch (SqliteException) { return -1; }   // UNIQUE(name COLLATE NOCASE) violation
+    }
+
+    /// <summary>Update a Potion's name and query. Returns false on NOCASE name collision or no row.</summary>
+    public bool UpdatePotion(long id, string name, string query)
+    {
+        try
+        {
+            return Exec("UPDATE potions SET name=$n, query=$q WHERE id=$id;",
+                ("$n", (name ?? "").Trim()), ("$q", query ?? ""), ("$id", id)) > 0;
+        }
+        catch (SqliteException) { return false; }
+    }
+
+    /// <summary>Delete a Potion by id (no FK dependents — safe to delete directly).</summary>
+    public void DeletePotion(long id) => Exec("DELETE FROM potions WHERE id=$id;", ("$id", id));
+
+    /// <summary>Count of non-archived images matching a search filter (T45/F32). Reuses
+    /// <see cref="BuildFromWhere"/> so the count exactly matches <see cref="Query"/>'s Total for the same
+    /// filter — one shared predicate, no desync. Used to show a live count on each Potion row.</summary>
+    public int CountForFilter(SearchFilter f)
+    {
+        var (fromWhere, ps) = BuildFromWhere(f, false, false, false, false, null, false, null, null, false, false);
+        return f.Tokens.Count > 0
+            ? Convert.ToInt32(Scalar($"SELECT COUNT(*) FROM (SELECT i.id {fromWhere});", ps.ToArray()) ?? 0)
+            : Convert.ToInt32(Scalar($"SELECT COUNT(*) {fromWhere};", ps.ToArray()) ?? 0);
+    }
+
+    /// <summary>Top seedable prompt-tag tokens for auto-seeding Potions (T45/F32). Returns tokens from
+    /// tag_freq where df ≥ minCount AND df &lt; (total non-archived images × maxFraction), ordered by
+    /// df DESC, capped at limit. The maxFraction exclusion removes near-universal tags (R30 mitigation).</summary>
+    public IReadOnlyList<string> TopSeedableTags(int minCount, double maxFraction, int limit)
+    {
+        var list = new List<string>();
+        using var cmd = _con.CreateCommand();
+        cmd.CommandText = @"SELECT token FROM tag_freq
+            WHERE df >= $min AND df < (SELECT COUNT(*)*$frac FROM images WHERE archived=0)
+            ORDER BY df DESC LIMIT $lim;";
+        cmd.Parameters.AddWithValue("$min", minCount);
+        cmd.Parameters.AddWithValue("$frac", maxFraction);
+        cmd.Parameters.AddWithValue("$lim", limit);
+        using var rd = cmd.ExecuteReader();
+        while (rd.Read()) list.Add(rd.GetString(0));
+        return list;
+    }
+
+    /// <summary>True once auto-seed has been run at least once (keyed by 'potions_seeded' in meta).</summary>
+    public bool IsPotionSeeded() => Scalar("SELECT v FROM meta WHERE k='potions_seeded';") is string;
+
+    /// <summary>Mark auto-seed as done. Idempotent — safe to call multiple times.</summary>
+    public void MarkPotionSeeded() => SetMeta("potions_seeded", "1");
 
     /// <summary>Add images to a collection (idempotent — INSERT OR IGNORE on the PK).</summary>
     public void AddToCollection(long collectionId, IEnumerable<long> imageIds) =>
