@@ -216,6 +216,15 @@
   #movepick .pickhead.sep2{border-top:1px solid #2a2236;margin-top:4px}
   #movepick .pickrow .nm{display:flex;align-items:center;gap:8px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   #movepick .pickrow .ct{color:var(--mut2);font-size:11px;flex:none}
+  /* T49/F36 Tags toolbar dropdown */
+  #tagwrap{position:relative;display:inline-flex}
+  #tagdrop{position:absolute;top:calc(100% + 4px);right:0;min-width:220px;max-height:280px;overflow-y:auto;
+    background:rgba(24,18,32,.98);backdrop-filter:blur(14px);border:1px solid #362a4c;border-radius:11px;
+    box-shadow:0 16px 44px rgba(0,0,0,.6);z-index:20;display:none;padding:5px 0}
+  #tagdrop .tdrow{padding:8px 14px;font-size:13px;color:#d8d0bf;cursor:pointer;display:flex;justify-content:space-between;gap:10px;align-items:center}
+  #tagdrop .tdrow:hover{background:rgba(91,59,140,.28)}
+  #tagdrop .tdhead{padding:7px 14px;font-size:12px;color:var(--acid);font-weight:600;cursor:default;white-space:nowrap;border-bottom:1px solid #2a2236;margin-bottom:2px}
+  #tagdrop .tdempty{padding:12px 14px;font-size:12px;color:var(--mut);cursor:default;line-height:1.5}
   /* auto-tag suggestion modal (T27) */
   #autotag-modal{position:fixed;inset:0;background:rgba(8,6,12,.7);z-index:55;display:none;align-items:center;justify-content:center}
   #autotag-modal.open{display:flex}
@@ -371,6 +380,10 @@
         <div id="ac"></div>
       </div>
       <label id="dupctl" title="Also group images within a small visual distance" style="display:none;align-items:center;gap:6px;color:var(--mut);font-size:12px;cursor:pointer;white-space:nowrap;user-select:none"><input type="checkbox" id="dupnear" /> Include near-dups</label>
+      <div id="tagwrap">
+        <div class="tbtn" id="tagbtn" title="Browse and filter by your tags">Tags ▾</div>
+        <div id="tagdrop"></div>
+      </div>
       <div class="tbtn on" id="dense-comf" title="Comfortable">▦</div>
       <div class="tbtn" id="dense-comp" title="Compact">▤</div>
       <div class="tbtn on" id="panelbtn" title="Toggle info panel">Info</div>
@@ -562,6 +575,7 @@
   let activePotion=null;                            // {pid,name,query} or null when no Potion is active
   let potDialogMode='create',potDialogPid=null;
   let potChips=[];
+  let tagDropFromDrop=false;    // true while a tag from #tagdrop is the active filter
   let potCountTimer=null,potUndoTimer=null,potUndoData=null;
 
   function post(m){ if(window.chrome&&window.chrome.webview) window.chrome.webview.postMessage(JSON.stringify(m)); }
@@ -610,7 +624,7 @@
     for(let i=0;i<s.length;i++){const c=s[i];if(c==='"')q=!q;else if(c===','&&!q)start=i+1;}return s.slice(start).trim();}
   let acTimer=null;
   search.addEventListener('input',()=>{ if(dupeMode) exitDupes(); raw=search.value;resetGrid();requestPage();
-    updatePotSave();
+    updatePotSave(); tagDropFromDrop=false; updateTagBtn();
     clearTimeout(acTimer);acTimer=setTimeout(()=>{const t=currentTerm();if(t.length>0&&!t.includes('"'))post({type:'ac',prefix:t});else hideAc();},75);});
   search.addEventListener('keydown',e=>{
     if(acBox.style.display==='block'&&acItems.length){
@@ -939,7 +953,31 @@
     if(colpick.style.display==='block' && !colpick.contains(e.target) && e.target.id!=='pill-addcol') hideColPick();
     const mp=$('#movepick'); if(mp.style.display==='block' && !mp.contains(e.target) && e.target.id!=='pill-moveto') hideMovePick();
     const mm=$('#moremenu'); if(mm.style.display==='block' && !mm.contains(e.target) && e.target.id!=='pill-more') hideMoreMenu();
+    const tw=$('#tagwrap'); if($('#tagdrop').style.display==='block' && !tw.contains(e.target)) hideTagDrop();
   });
+
+  // T49/F36 Tags toolbar dropdown
+  function openTagDrop(){ hideColPick(); hideMovePick(); hideMoreMenu();
+    const td=$('#tagdrop'); td.innerHTML='<div class="tdrow" style="color:var(--mut)">Loading…</div>'; td.style.display='block'; post({type:'taglist'}); }
+  function hideTagDrop(){ $('#tagdrop').style.display='none'; }
+  function updateTagBtn(){ $('#tagbtn').classList.toggle('on',tagDropFromDrop); }
+  function insertTagChip(token){ const s=search.value.trimEnd(); search.value=(s?s+', ':'')+token+', '; hideAc(); raw=search.value; resetGrid(); requestPage(); search.focus(); }
+  function handleTagList(m){
+    const td=$('#tagdrop'); td.innerHTML=''; const tags=m.tags||[];
+    if(tags.length===0){ const e=document.createElement('div'); e.className='tdempty';
+      e.textContent='No tags yet — open an image and add tags in the TAGS inspector tab.'; td.appendChild(e); return; }
+    if(sel.size>0){ const h=document.createElement('div'); h.className='tdhead'; h.id='tagdrop-head';
+      h.textContent='Add to '+sel.size+' selected'; td.appendChild(h); }
+    tags.forEach(t=>{ const d=document.createElement('div'); d.className='tdrow';
+      d.innerHTML='<span>'+esc(t.token)+'</span><span class="df">'+t.df+'</span>';
+      if(sel.size>0){ d.onclick=()=>{ d.innerHTML='<span style="color:var(--mut)">Adding…</span>'; d.onclick=null; post({type:'tagbulkadd',token:t.token,ids:[...sel]}); }; }
+      else { d.onclick=()=>{ insertTagChip(t.token); hideTagDrop(); tagDropFromDrop=true; updateTagBtn(); }; }
+      td.appendChild(d); }); }
+  function handleTagBulkDone(m){ const h=$('#tagdrop-head'); if(!h) return;
+    const prev=h.textContent; h.style.color='var(--acid)';
+    h.textContent='✓ Added “'+m.token+'” to '+sel.size+' image'+(sel.size===1?'':'s');
+    setTimeout(()=>{ h.textContent=prev; h.style.color=''; },2000); }
+  $('#tagbtn').onclick=()=>{ if($('#tagdrop').style.display==='block') hideTagDrop(); else openTagDrop(); };
 
   // Folders sidebar removed (F33/v2.5). foldersCache kept for the Move-to picker (shows empty gracefully).
   let foldersCache=[];
@@ -1129,7 +1167,9 @@
     else if(m.type==='status'){ countEl.textContent=m.text; }
     else if(m.type==='potions'){ renderPotNav(m.items||[]); if($('#pot-dialog').classList.contains('open')) closePotDialog(); }
     else if(m.type==='potcount'){ $('#pot-count').textContent=m.count!=null?Number(m.count).toLocaleString():'—'; }
-    else if(m.type==='poterror'){ const er=$('#pot-error'); er.textContent=m.message||'Error'; er.style.display='block'; } });
+    else if(m.type==='poterror'){ const er=$('#pot-error'); er.textContent=m.message||'Error'; er.style.display='block'; }
+    else if(m.type==='taglist'){ handleTagList(m); }
+    else if(m.type==='tagbulkdone'){ handleTagBulkDone(m); } });
 
   new IntersectionObserver(es=>{ if(es[0].isIntersecting) requestPage(); },{root:scroll,rootMargin:'400px'}).observe($('#sentinel'));
   requestPage(); post({type:'counts'}); post({type:'cols'}); post({type:'folders'}); post({type:'potions'});   // T28/T33 sidebars + F32 Potions

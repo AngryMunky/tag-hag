@@ -60,10 +60,14 @@ public sealed class MainForm : Form
         _tb.Items.Add(Btn("Add source folder", AddSourceFolder));
         _tb.Items.Add(Btn("Scan", async () => await DoScan()));
         _tb.Items.Add(Btn("Optimize Library…", OpenOptimizeLibrary));   // T30 / F20
-        _tb.Items.Add(new ToolStripSeparator());
-        _tb.Items.Add(Btn("Civitai", OpenCivitai));
-        _tb.Items.Add(Btn("Settings", async () => await OpenSettings()));
-        _tb.Items.Add(Btn("About", ShowAbout));
+        var more = new ToolStripDropDownButton("⋯") {
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            ToolTipText  = "Civitai · Settings · About"
+        };
+        more.DropDownItems.Add(new ToolStripMenuItem("Civitai",  null, (_, _) => OpenCivitai()));
+        more.DropDownItems.Add(new ToolStripMenuItem("Settings", null, async (_, _) => await OpenSettings()));
+        more.DropDownItems.Add(new ToolStripMenuItem("About",    null, (_, _) => ShowAbout()));
+        _tb.Items.Add(more);
     }
 
     private static ToolStripButton Btn(string text, Action onClick)

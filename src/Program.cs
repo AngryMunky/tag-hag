@@ -99,6 +99,8 @@ internal static class Program
             return NotesSelfTest();
         if (args.Any(a => string.Equals(a, "--selftest-usertags", StringComparison.OrdinalIgnoreCase)))
             return UserTagsSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-tagdrop", StringComparison.OrdinalIgnoreCase)))
+            return TagDropSelfTest();
         if (args.Any(a => string.Equals(a, "--selftest-collections", StringComparison.OrdinalIgnoreCase)))
             return CollectionsSelfTest();
         if (args.Any(a => string.Equals(a, "--selftest-autotag", StringComparison.OrdinalIgnoreCase)))
@@ -2342,6 +2344,70 @@ internal static class Program
             W(ok ? "RESULT: PASS" : "RESULT: FAIL"); WriteResultNamed(log, "selftest-usertags-result.txt"); return ok ? 0 : 1;
         }
         catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-usertags-result.txt"); return 2; }
+    }
+
+    /// <summary>T49/F36 Tags dropdown: GetAllUserTags order, AddUserTagBulk insert+dedup,
+    /// trigger-maintained user_tag_freq, and the taglist/tagbulkadd bridge replies.</summary>
+    private static int TagDropSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder(); var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string l, bool c) { if (!c) ok = false; W($"  [{(c ? "ok" : "FAIL")}] {l}"); }
+        try
+        {
+            using var db = new LibraryDb(FreshDb("selftest-tagdrop.db"));
+
+            // Seed 3 images and manually tag them to populate user_tag_freq via triggers.
+            db.Upsert(TestRow("a.png", "portrait")); long idA = db.FindIdByAbsPath("a.png")!.Value;
+            db.Upsert(TestRow("b.png", "landscape")); long idB = db.FindIdByAbsPath("b.png")!.Value;
+            db.Upsert(TestRow("c.png", "portrait"));  long idC = db.FindIdByAbsPath("c.png")!.Value;
+
+            // 'portrait' on idA and idC → df=2; 'landscape' on idB → df=1.
+            db.AddUserTags(idA, "portrait");
+            db.AddUserTags(idC, "portrait");
+            db.AddUserTags(idB, "landscape");
+
+            var all = db.GetAllUserTags();
+            Check("GetAllUserTags returns both tokens", all.Count == 2);
+            Check("GetAllUserTags df-desc: 'portrait' first (df=2)", all[0].Token == "portrait" && all[0].Df == 2);
+            Check("GetAllUserTags: 'landscape' second (df=1)", all[1].Token == "landscape" && all[1].Df == 1);
+
+            // Bulk-add 'nature' to both idA and idB.
+            int inserted = db.AddUserTagBulk([idA, idB], "nature");
+            Check("AddUserTagBulk: 2 rows inserted", inserted == 2);
+            Check("nature in user_tags for idA", db.UserTagsFor(idA).Contains("nature"));
+            Check("nature in user_tags for idB", db.UserTagsFor(idB).Contains("nature"));
+            var natureRow = db.GetAllUserTags().FirstOrDefault(t => t.Token == "nature");
+            Check("user_tag_freq.df for 'nature' = 2 (trigger-maintained)", natureRow.Df == 2);
+
+            // Duplicate bulk-add: INSERT OR IGNORE should insert 0 new rows.
+            int dup = db.AddUserTagBulk([idA, idB], "nature");
+            Check("AddUserTagBulk duplicate: 0 rows inserted", dup == 0);
+            var natureRow2 = db.GetAllUserTags().FirstOrDefault(t => t.Token == "nature");
+            Check("user_tag_freq.df unchanged after duplicate bulk-add", natureRow2.Df == 2);
+
+            // Bridge: taglist returns correct JSON.
+            var bridge = new GalleryBridge(db, r => $"https://full.local/{r.Id}");
+            using var tlDoc = System.Text.Json.JsonDocument.Parse(bridge.Handle("{\"type\":\"taglist\"}")!);
+            var tlRoot = tlDoc.RootElement;
+            Check("taglist reply type='taglist'", tlRoot.GetProperty("type").GetString() == "taglist");
+            var tlTags = tlRoot.GetProperty("tags").EnumerateArray().ToList();
+            Check("taglist tags count ≥ 3 (portrait/landscape/nature)", tlTags.Count >= 3);
+            Check("taglist first tag is highest-df", tlTags[0].GetProperty("df").GetInt32() >= tlTags[1].GetProperty("df").GetInt32());
+
+            // Bridge: tagbulkadd applies and returns count.
+            var bulkJson = $"{{\"type\":\"tagbulkadd\",\"token\":\"dark\",\"ids\":[{idA},{idC}]}}";
+            using var tbDoc = System.Text.Json.JsonDocument.Parse(bridge.Handle(bulkJson)!);
+            var tbRoot = tbDoc.RootElement;
+            Check("tagbulkadd reply type='tagbulkdone'", tbRoot.GetProperty("type").GetString() == "tagbulkdone");
+            Check("tagbulkadd count=2", tbRoot.GetProperty("count").GetInt32() == 2);
+            Check("tagbulkadd token echoed", tbRoot.GetProperty("token").GetString() == "dark");
+            Check("'dark' actually in user_tags for idA", db.UserTagsFor(idA).Contains("dark"));
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL"); WriteResultNamed(log, "selftest-tagdrop-result.txt"); return ok ? 0 : 1;
+        }
+        catch (Exception ex) { W("RESULT: FAIL (exception)"); W(ex.ToString()); WriteResultNamed(log, "selftest-tagdrop-result.txt"); return 2; }
     }
 
     /// <summary>T28 Collections: create + UNIQUE-NOCASE, idempotent add, filter==membership (page==total),

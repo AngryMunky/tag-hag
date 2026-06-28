@@ -39,8 +39,10 @@ public sealed class GalleryBridge
                 // These synchronously RETURN a reply, so they're answered here (not host-side in
                 // MainForm). Manual-tag add/del + the collections read. fav/note/col-writes are
                 // intercepted in MainForm because they push {type:'reload'} / are silent.
-                "tagadd" => HandleTagAdd(root),
-                "tagdel" => HandleTagDel(root),
+                "tagadd"     => HandleTagAdd(root),
+                "tagdel"     => HandleTagDel(root),
+                "taglist"    => HandleTagList(),
+                "tagbulkadd" => HandleTagBulkAdd(root),
                 "cols" => HandleCols(),
                 "folders" => HandleFolders(),
                 "optimizepreview" => HandleOptimizePreview(root),
@@ -149,6 +151,25 @@ public sealed class GalleryBridge
         var acTarget = root.TryGetProperty("acTarget", out var at) ? at.GetString() ?? "search" : "search";
         var items = _db.TopTags(prefix, 8).Select(x => new { token = x.Token, df = x.Df });
         return JsonSerializer.Serialize(new { type = "ac", acTarget, items }, Json);
+    }
+
+    // -- Tags dropdown (T49/F36): full user-tag list for the toolbar dropdown; bulk-apply one tag to many images. --
+    private string HandleTagList()
+    {
+        var tags = _db.GetAllUserTags().Select(x => new { token = x.Token, df = x.Df });
+        return JsonSerializer.Serialize(new { type = "taglist", tags }, Json);
+    }
+
+    private string? HandleTagBulkAdd(JsonElement root)
+    {
+        if (!root.TryGetProperty("token", out var tokEl)) return null;
+        var token = tokEl.GetString() ?? "";
+        if (token.Length == 0) return null;
+        long[] ids = root.TryGetProperty("ids", out var idsEl)
+            ? idsEl.EnumerateArray().Select(x => x.GetInt64()).ToArray()
+            : [];
+        var count = _db.AddUserTagBulk(ids, token);
+        return JsonSerializer.Serialize(new { type = "tagbulkdone", count, token }, Json);
     }
 
     // -- Manual tags (T26): write then return the refreshed {type:'tags',id,prompt[],user[]} reply. --

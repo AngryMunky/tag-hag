@@ -982,6 +982,37 @@ CREATE INDEX IF NOT EXISTS ix_potions_sort ON potions(sort_order, id);");
     public IReadOnlyList<string> PromptTagsFor(long id) => TokenList("image_tags", id);
     /// <summary>Manual ('Your') tags for an image — from user_tags.</summary>
     public IReadOnlyList<string> UserTagsFor(long id) => TokenList("user_tags", id);
+
+    /// <summary>All user-defined tags sorted by frequency desc (uncapped). For the Tags toolbar dropdown.</summary>
+    public IReadOnlyList<(string Token, int Df)> GetAllUserTags()
+    {
+        var list = new List<(string, int)>();
+        using var cmd = _con.CreateCommand();
+        cmd.CommandText = "SELECT token, df FROM user_tag_freq ORDER BY df DESC;";
+        using var rd = cmd.ExecuteReader();
+        while (rd.Read()) list.Add((rd.GetString(0), rd.GetInt32(1)));
+        return list;
+    }
+
+    /// <summary>Bulk-apply a pre-normalised token to multiple images in one transaction.
+    /// INSERT OR IGNORE — duplicates are silently skipped. user_tag_freq is trigger-maintained.
+    /// Returns the number of rows actually inserted.</summary>
+    public int AddUserTagBulk(long[] ids, string token)
+    {
+        if (ids.Length == 0 || string.IsNullOrWhiteSpace(token)) return 0;
+        int inserted = 0;
+        using var tx = _con.BeginTransaction();
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.CommandText = "INSERT OR IGNORE INTO user_tags(image_id, token) VALUES($id,$t);";
+            var pId = cmd.Parameters.Add("$id", SqliteType.Integer);
+            cmd.Parameters.AddWithValue("$t", token);
+            foreach (var id in ids) { pId.Value = id; inserted += cmd.ExecuteNonQuery(); }
+        }
+        tx.Commit();
+        return inserted;
+    }
+
     private IReadOnlyList<string> TokenList(string table, long id)
     {
         var list = new List<string>();
