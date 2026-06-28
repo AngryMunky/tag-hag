@@ -21,7 +21,8 @@ Grab **`TheTagHag.exe`** from the [**Releases**](https://github.com/AngryMunky/t
 - **Gallery** with virtualized infinite scroll and a lazy 512px WebP **thumbnail cache** for fast load at scale.
 - **Inspector panel** + lightbox showing positive / negative prompt, checkpoint, LoRAs, sampler / steps / CFG / seed, with copy buttons.
 - **Personal knowledge management** — **Favorites**, per-image **Notes**, and **manual tags** that blend into the same search as the prompt tags. None of it is wiped by a re-scan.
-- **Collections**: group images into named logical sets, kept separate from your folders.
+- **Collections**: group images into named, **nested** logical sets. Build a hierarchy in the sidebar, then **Consolidate by collection tree** to write that hierarchy to disk — one definitive home per image; uncollected images land in `_Uncollected`.
+- **Potions** 🧪: save any search as a named "Potion" — a reusable filter you can recall from the sidebar instantly. Auto-seeded from your most-used tags on first run; full CRUD with undo.
 - **Auto-Tag** (suggest-only): proposes tags for an image from its visually-similar neighbours; you approve each one.
 - **Find Duplicates** by perceptual hash — exact and near-match.
 - **Folders**: your imported subfolders show up as a browsable sidebar tree — rename or move a folder in-app and the library follows on disk.
@@ -55,9 +56,9 @@ The engine has a headless self-test harness (the GUI is verified in-app). Each p
 ```sh
 TheTagHag.exe --selftest          # SQLite + FTS5 smoke test
 TheTagHag.exe --selftest-scan tests\fixtures
-# feature suites: -db -dupes -v4migrate -optimizelib -optindicator -relink -folders
-#                 -filemanager -favorites -notes -usertags -collections -autotag
-#                 -selectall -scanprogress
+# feature suites: -db -dupes -v4migrate -v5migrate -optimizelib -optindicator -relink
+#                 -folders -filemanager -favorites -notes -usertags -collections -autotag
+#                 -selectall -scanprogress -collnest -collconsolidate -potions
 ```
 
 Regenerate the app icon from the brand mark:
