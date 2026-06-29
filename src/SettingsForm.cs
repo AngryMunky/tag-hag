@@ -128,10 +128,9 @@ public sealed class SettingsForm : Form
         {
             using var dlg = new OpenFileDialog { Title = "Select WD14 ONNX model", Filter = "ONNX model (*.onnx)|*.onnx" };
             if (dlg.ShowDialog(this) != DialogResult.OK) return;
-            var csvPath = Path.Combine(Path.GetDirectoryName(dlg.FileName)!, "selected_tags.csv");
-            if (!File.Exists(csvPath))
+            if (Wd14Tagger.FindCsv(dlg.FileName) == null)
             {
-                MessageBox.Show(this, "selected_tags.csv not found beside the selected .onnx file.\nBoth files must be in the same folder.", "WD14 Setup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, "No tags CSV found beside the selected .onnx file.\nPlace selected_tags.csv in the same folder as the model.", "WD14 Setup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             _wdModelPath.Text = dlg.FileName;

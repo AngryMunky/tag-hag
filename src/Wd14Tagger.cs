@@ -28,9 +28,8 @@ public sealed class Wd14Tagger : IDisposable
     {
         if (!File.Exists(modelPath))
             throw new FileNotFoundException("ONNX model not found.", modelPath);
-        var csvPath = Path.Combine(Path.GetDirectoryName(modelPath)!, "selected_tags.csv");
-        if (!File.Exists(csvPath))
-            throw new FileNotFoundException("selected_tags.csv not found beside the model.", csvPath);
+        var csvPath = FindCsv(modelPath) ?? throw new FileNotFoundException(
+            "No tags CSV found beside the model. Place selected_tags.csv in the same folder as the .onnx file.", modelPath);
 
         _threshold = threshold;
         _session = new InferenceSession(modelPath);
@@ -76,7 +75,7 @@ public sealed class Wd14Tagger : IDisposable
 
     /// <summary>
     /// Search known WD14 install locations on disk. Returns the first .onnx that has a sibling
-    /// selected_tags.csv, or null if none found.
+    /// tags CSV (selected_tags.csv preferred; any .csv accepted as fallback), or null if none found.
     /// Checks: A1111 interrogate folder, ComfyUI clip_vision, webui interrogate, exe directory.
     /// </summary>
     public static string? FindAutomatic()
@@ -91,9 +90,20 @@ public sealed class Wd14Tagger : IDisposable
         ];
         foreach (var dir in dirs.Where(Directory.Exists))
             foreach (var onnx in Directory.EnumerateFiles(dir, "*.onnx", SearchOption.TopDirectoryOnly))
-                if (File.Exists(Path.Combine(Path.GetDirectoryName(onnx)!, "selected_tags.csv")))
+                if (FindCsv(onnx) != null)
                     return onnx;
         return null;
+    }
+
+    /// <summary>Find the tags CSV beside a given .onnx path.
+    /// Prefers selected_tags.csv; falls back to any single .csv in the same folder.</summary>
+    public static string? FindCsv(string modelPath)
+    {
+        var dir = Path.GetDirectoryName(modelPath)!;
+        var preferred = Path.Combine(dir, "selected_tags.csv");
+        if (File.Exists(preferred)) return preferred;
+        var any = Directory.EnumerateFiles(dir, "*.csv", SearchOption.TopDirectoryOnly).FirstOrDefault();
+        return any;
     }
 
     private static (string Name, int Category)[] ParseCsv(string csvPath)
