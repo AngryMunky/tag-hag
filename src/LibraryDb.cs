@@ -222,6 +222,16 @@ CREATE INDEX IF NOT EXISTS ix_potions_sort ON potions(sort_order, id);");
         Exec("CREATE INDEX IF NOT EXISTS ix_images_optimized ON images(optimized);");
         Exec("CREATE INDEX IF NOT EXISTS ix_collections_parent ON collections(parent_id);");
 
+        // v2.8 / F40 "Retire The Bog": un-archive all rows ONCE (meta-guarded data migration, NOT a
+        // schema change — A37). The `archived` column stays; the app simply stops writing/filtering on
+        // it (Reject removed). Runs in the ctor before any query renders; idempotent across restarts
+        // via the `bog_unarchived` flag (a row archived later is left as-is).
+        if (GetMetaInt("bog_unarchived") is null)
+        {
+            Exec("UPDATE images SET archived=0 WHERE archived=1;");
+            SetMeta("bog_unarchived", "1");
+        }
+
         if (current is null || current < SchemaVersion)
             SetMeta("schema_version", SchemaVersion.ToString());
     }

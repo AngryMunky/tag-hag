@@ -68,6 +68,8 @@ internal static class Program
             return V4MigrateSelfTest();
         if (args.Any(a => string.Equals(a, "--selftest-v5migrate", StringComparison.OrdinalIgnoreCase)))
             return V5MigrateSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-bogretire", StringComparison.OrdinalIgnoreCase)))
+            return BogRetireSelfTest();
         if (args.Any(a => string.Equals(a, "--selftest-collnest", StringComparison.OrdinalIgnoreCase)))
             return CollNestSelfTest();
         if (args.Any(a => string.Equals(a, "--selftest-optimizelib", StringComparison.OrdinalIgnoreCase)))
@@ -1231,6 +1233,68 @@ internal static class Program
     /// v2.0 user state (favorite flag, note, user tag, collection membership) SURVIVES a simulated
     /// rescan (UpsertCore's full image_tags replace) and an archive, then cascades away on delete.
     /// </summary>
+    /// <summary>v2.8 / T52: the F40 "Retire The Bog" un-archive migration un-archives all rows once
+    /// (meta-guarded + idempotent — a row archived AFTER the one-time run is left as-is), and
+    /// AppSettings.Compact (OQ-v28-2 density persistence) round-trips through serialization.</summary>
+    private static int BogRetireSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder();
+        var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string label, bool cond) { if (!cond) ok = false; W($"  [{(cond ? "ok" : "FAIL")}] {label}"); }
+        SqliteConnection Open(string p) { var c = new SqliteConnection($"Data Source={p}"); c.Open(); return c; }
+        long L(SqliteConnection c, string sql) => Convert.ToInt64(Scalar(c, sql) ?? 0L);
+
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — F40 Retire-the-Bog un-archive migration (T52) self-test");
+
+            // 1) Seed a real library, archive 3 of 5 rows, and clear the flag to simulate a pre-v2.8 DB.
+            var dbPath = FreshDb("selftest-bogretire.db");
+            using (var db = new LibraryDb(dbPath))
+                for (int i = 1; i <= 5; i++)
+                    db.Upsert(new ImageRow { SourceRoot = "r", RelPath = $"b{i}.png", AbsPath = $"b{i}.png", FileName = $"b{i}.png", Ext = ".png", SizeBytes = 1, MtimeTicks = 1, MetaFormat = "none", ScannedAt = "t" });
+            using (var c = Open(dbPath))
+            {
+                Exec(c, "UPDATE images SET archived=1 WHERE id<=3;");
+                Exec(c, "DELETE FROM meta WHERE k='bog_unarchived';");
+                Check("setup: 3 rows archived before migration", L(c, "SELECT COUNT(*) FROM images WHERE archived=1;") == 3);
+                Check("setup: bog_unarchived flag absent", L(c, "SELECT COUNT(*) FROM meta WHERE k='bog_unarchived';") == 0);
+            }
+
+            // 2) Opening via LibraryDb runs the one-time migration.
+            using (new LibraryDb(dbPath)) { }
+            using (var c = Open(dbPath))
+            {
+                Check("migrated: 0 rows archived", L(c, "SELECT COUNT(*) FROM images WHERE archived=1;") == 0);
+                Check("migrated: all 5 rows still present (no data loss)", L(c, "SELECT COUNT(*) FROM images;") == 5);
+                Check("migrated: bog_unarchived flag set", L(c, "SELECT v FROM meta WHERE k='bog_unarchived';") == 1);
+            }
+
+            // 3) Idempotent: a row archived AFTER the one-time run survives a re-open.
+            using (var c = Open(dbPath)) Exec(c, "UPDATE images SET archived=1 WHERE id=1;");
+            using (new LibraryDb(dbPath)) { }
+            using (var c = Open(dbPath))
+                Check("idempotent: flag set → migration is a no-op on later archives", L(c, "SELECT COUNT(*) FROM images WHERE archived=1;") == 1);
+
+            // 4) AppSettings.Compact round-trips (OQ-v28-2 density persistence).
+            var s2 = System.Text.Json.JsonSerializer.Deserialize<AppSettings>(System.Text.Json.JsonSerializer.Serialize(new AppSettings { Compact = true }))!;
+            Check("AppSettings.Compact round-trips (true)", s2.Compact);
+            Check("AppSettings.Compact defaults to false (Comfortable)", !new AppSettings().Compact);
+
+            W(ok ? "RESULT: PASS" : "RESULT: FAIL");
+            WriteResultNamed(log, "selftest-bogretire-result.txt");
+            return ok ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            W("RESULT: FAIL (exception)"); W(ex.ToString());
+            WriteResultNamed(log, "selftest-bogretire-result.txt");
+            return 2;
+        }
+    }
+
     private static int V3MigrateSelfTest()
     {
         Native.TryAttachParentConsole();

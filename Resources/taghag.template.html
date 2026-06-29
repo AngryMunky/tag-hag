@@ -42,7 +42,8 @@
   .navrow.v2:hover{background:none}
   .v2pill{font-size:9px;letter-spacing:.5px;padding:1px 5px;border-radius:5px;background:#241b30;color:#8b7ea8;border:1px solid #312842}
   .v2note{padding:6px 12px;font-size:11.5px;color:#544c61;font-style:italic}
-  #verline{margin-top:auto;padding:10px 14px;color:#473f54;font-size:10.5px}
+  /* v2.8/T53: cauldron empty-state art — sidebar (Collections/Potions empty) + center (Untagged empty). Scales down in a narrow sidebar (A51). */
+  .cauldron-art{display:block;width:180px;max-width:100%;height:auto;margin:0 auto 10px;opacity:.85}
 
   /* ---------------- CENTER ---------------- */
   #center{flex:1;display:flex;flex-direction:column;min-width:0;position:relative;z-index:2}   /* T34: lift center (+ its floating action bar) above the inspector */
@@ -122,8 +123,6 @@
   .pill-copy:hover{background:rgba(199,162,82,.26)}
   .pill-opt{border-color:#322940;color:#b3a9c0}
   .pill-opt:hover{background:rgba(255,255,255,.05)}
-  .pill-reject{background:rgba(214,138,160,.14);border-color:rgba(214,138,160,.42);color:#e6abbd}
-  .pill-reject:hover{background:rgba(214,138,160,.24)}
   .pill-del{background:rgba(224,129,111,.12);border-color:rgba(224,129,111,.4);color:#e6a395}
   .pill-del:hover{background:rgba(224,129,111,.22)}
   #actionbar .sep{width:1px;height:22px;background:#322940;margin:0 3px}
@@ -216,15 +215,7 @@
   #movepick .pickhead.sep2{border-top:1px solid #2a2236;margin-top:4px}
   #movepick .pickrow .nm{display:flex;align-items:center;gap:8px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   #movepick .pickrow .ct{color:var(--mut2);font-size:11px;flex:none}
-  /* T49/F36 Tags toolbar dropdown */
-  #tagwrap{position:relative;display:inline-flex}
-  #tagdrop{position:absolute;top:calc(100% + 4px);right:0;min-width:220px;max-height:280px;overflow-y:auto;
-    background:rgba(24,18,32,.98);backdrop-filter:blur(14px);border:1px solid #362a4c;border-radius:11px;
-    box-shadow:0 16px 44px rgba(0,0,0,.6);z-index:20;display:none;padding:5px 0}
-  #tagdrop .tdrow{padding:8px 14px;font-size:13px;color:#d8d0bf;cursor:pointer;display:flex;justify-content:space-between;gap:10px;align-items:center}
-  #tagdrop .tdrow:hover{background:rgba(91,59,140,.28)}
-  #tagdrop .tdhead{padding:7px 14px;font-size:12px;color:var(--acid);font-weight:600;cursor:default;white-space:nowrap;border-bottom:1px solid #2a2236;margin-bottom:2px}
-  #tagdrop .tdempty{padding:12px 14px;font-size:12px;color:var(--mut);cursor:default;line-height:1.5}
+  /* v2.8/T53/F42: Tags ▾ dropdown assembly removed (toolbar is search-only). */
   /* auto-tag suggestion modal (T27) */
   #autotag-modal{position:fixed;inset:0;background:rgba(8,6,12,.7);z-index:55;display:none;align-items:center;justify-content:center}
   #autotag-modal.open{display:flex}
@@ -338,26 +329,22 @@
     <div class="navhead">Library</div>
     <nav id="libnav">
       <div class="navrow on" data-scope="all"><span class="l"><span class="ico">⬚</span>All Images</span><span class="cnt" id="cnt-all">—</span></div>
-      <div class="navrow" data-scope="unsorted"><span class="l"><span class="ico">▢</span>Unsorted</span><span class="cnt" id="cnt-unsorted">—</span></div>
-<div class="navrow" data-scope="favorites"><span class="l"><span class="ico" style="color:#C7A252">★</span>Favorites</span><span class="cnt" id="cnt-favorites"></span></div>
+      <div class="navrow" data-scope="favorites"><span class="l"><span class="ico" style="color:#C7A252">★</span>Favorites</span><span class="cnt" id="cnt-favorites"></span></div>
       <div class="navrow" data-scope="optimized"><span class="l"><span class="ico" style="color:#A4FF6A">✨</span>Optimized</span><span class="cnt" id="cnt-optimized"></span></div>
       <div class="navrow" data-scope="untagged"><span class="l"><span class="ico" style="color:#a98fd6">⚗</span>Untagged</span><span class="cnt" id="cnt-untagged">—</span></div>
-      <div class="navrow" data-scope="bog"><span class="l"><span class="ico" style="color:#d68aa0">☠</span>The Bog</span><span class="cnt" id="cnt-bog">—</span></div>
     </nav>
 
     <div class="navhead" style="display:flex;align-items:center;justify-content:space-between">
       <span>Collections</span><span class="colnewbtn" id="colnew" title="New top-level collection">＋ New</span>
     </div>
     <nav id="colnav"></nav>
-    <div class="v2note" id="colempty">No collections yet — create one with ＋ New, then drag images in.</div>
+    <div class="v2note" id="colempty"><img class="cauldron-art" src="cauldron-empty.png" alt="" onerror="this.style.display='none'" />No collections yet — create one with ＋ New, then drag images in.</div>
 
     <div class="navhead" style="display:flex;align-items:center;justify-content:space-between">
       <span>Potions</span><span class="colnewbtn" id="potnew" title="New Potion — build a named saved search from scratch">＋ New</span>
     </div>
     <nav id="potnav"></nav>
-    <div class="v2note" id="potempty">No Potions brewed yet. Search for tags above, then tap Save as Potion to bottle that search — or use ＋ New to build one from scratch. Your brews live here for instant recall.</div>
-
-    <div id="verline">v__VERSION__</div>
+    <div class="v2note" id="potempty"><img class="cauldron-art" src="cauldron-empty.png" alt="" onerror="this.style.display='none'" />No Potions brewed yet. Search for tags above, then tap Save as Potion to bottle that search — or use ＋ New to build one from scratch. Your brews live here for instant recall.</div>
   </aside>
 
   <!-- ===================== CENTER ===================== -->
@@ -380,12 +367,7 @@
         <div id="ac"></div>
       </div>
       <label id="dupctl" title="Also group images within a small visual distance" style="display:none;align-items:center;gap:6px;color:var(--mut);font-size:12px;cursor:pointer;white-space:nowrap;user-select:none"><input type="checkbox" id="dupnear" /> Include near-dups</label>
-      <div id="tagwrap">
-        <div class="tbtn" id="tagbtn" title="Browse and filter by your tags">Tags ▾</div>
-        <div id="tagdrop"></div>
-      </div>
-      <div class="tbtn on" id="dense-comf" title="Comfortable">▦</div>
-      <div class="tbtn" id="dense-comp" title="Compact">▤</div>
+      <!-- v2.8/T53: Tags ▾ + density buttons removed (F42; density now driven by the WinForms View menu). -->
       <div class="tbtn on" id="panelbtn" title="Toggle info panel">Info</div>
     </div>
 
@@ -402,7 +384,8 @@
         </div>
       </div>
       <div id="emptymsg">
-        <div class="hat-halo"><div class="hat"><div class="brim"></div><div class="eye"></div></div></div>
+        <div class="hat-halo" id="emptyhat"><div class="hat"><div class="brim"></div><div class="eye"></div></div></div>
+        <img id="emptyart" class="cauldron-art" src="cauldron-empty.png" alt="" onerror="this.style.display='none'" style="display:none" />
         <div id="emptytitle" class="cinzel">The hoard is quiet… for now.</div>
         <div id="emptysub">Add a source folder in Settings, then Scan to fill the cauldron.</div>
         <div id="emptybtn" style="display:none">Clear Filters</div>
@@ -417,7 +400,6 @@
         <div class="pill pill-opt" id="pill-fav"><span style="color:#C7A252">★</span> Favorite</div>
         <div class="pill pill-opt" id="pill-addcol">＋ Add to Collection…</div>
         <div class="pill pill-copy" data-op="copy"><span style="color:#C7A252">⧉</span> Copy</div>
-        <div class="pill pill-reject" data-op="archive"><span style="color:#d68aa0">☠</span> Reject <span class="k">to Bog</span></div>
       </span>
       <div class="pill pill-opt more" id="pill-more">⋯ More</div>
       <div class="sep"></div>
@@ -549,7 +531,6 @@
   <div class="sep"></div>
   <div class="mi" data-act="copy"><span class="l"><span class="ico" style="color:#C7A252">⧉</span>Copy To…</span></div>
   <div class="mi" data-act="move"><span class="l"><span class="ico" style="color:#a98fd6">⮕</span>Move To…</span></div>
-  <div class="mi" data-act="archive"><span class="l"><span class="ico" style="color:#d68aa0">☠</span>Reject (to the Bog)</span></div>
   <div class="mi" data-act="optimize"><span class="l"><span class="ico" style="color:#b3a9c0">⛭</span>Optimize…</span></div>
   <div class="sep"></div>
   <div class="mi danger" data-act="delete"><span class="l"><span class="ico">🗑</span>Delete</span><span class="k">Del</span></div>
@@ -562,7 +543,7 @@
         scroll=$('#gridwrap'),lb=$('#lb'),actionbar=$('#actionbar'),seln=$('#seln');
   const SIZE=60;
   let page=0,total=0,loading=false,exhausted=false,raw='',gen=0;
-  let scope='all';                              // all | unsorted | bog | favorites | col | folder
+  let scope='all';                              // all | favorites | optimized | untagged | col | folder | dupes
   let currentCid=null;                          // active collection id when scope==='col' (T28)
   let currentFolderPath=null, currentFolderRoot=null, folderSubtree=false;  // active folder node + subtree toggle (T33/F24)
   let collSubtree=false;                             // include sub-collections toggle (T42/F29)
@@ -573,18 +554,16 @@
   let loaded=[], cur=-1, curMeta=null, panelIdx=-1, panelMeta=null, tab='info';
   let sel=new Set(), lastIdx=-1;
   let dupeMode=false, nearDupes=false;
-  const TITLES={all:'All Images',unsorted:'Unsorted',bog:'The Bog',dupes:'Duplicates',favorites:'Favorites',optimized:'Optimized',untagged:'Untagged'};
+  const TITLES={all:'All Images',dupes:'Duplicates',favorites:'Favorites',optimized:'Optimized',untagged:'Untagged'};
   // T46/F32 Potions state
   let activePotion=null;                            // {pid,name,query} or null when no Potion is active
   let potDialogMode='create',potDialogPid=null;
   let potChips=[];
-  let tagDropFromDrop=false;    // true while a tag from #tagdrop is the active filter
   let potCountTimer=null,potUndoTimer=null,potUndoData=null;
 
   function post(m){ if(window.chrome&&window.chrome.webview) window.chrome.webview.postMessage(JSON.stringify(m)); }
   function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-  function flags(){ if(scope==='unsorted')return{untaggedOnly:true}; if(scope==='bog')return{archivedOnly:true};
-    if(scope==='favorites')return{favoritesOnly:true}; if(scope==='optimized')return{optimizedOnly:true}; if(scope==='untagged')return{noMetadataUntaggedOnly:true};
+  function flags(){ if(scope==='favorites')return{favoritesOnly:true}; if(scope==='optimized')return{optimizedOnly:true}; if(scope==='untagged')return{noMetadataUntaggedOnly:true};
     if(scope==='col')return{collectionId:currentCid,includeSubcollections:collSubtree};
     if(scope==='folder')return{folderPath:currentFolderPath, folderRoot:currentFolderRoot, includeSubfolders:folderSubtree}; return {}; }
   function deactivatePotionSilent(){ if(!activePotion)return; activePotion=null;
@@ -613,11 +592,9 @@
     $('#viewtitle').textContent='All Images'; }
   $('#dupnear').onchange=()=>{ nearDupes=$('#dupnear').checked; if(dupeMode) runDupes(); };
 
-  // ---- density ----
+  // ---- density (v2.8/T53/F42: driven by the WinForms View menu via the {type:'density'} bridge; the HTML toggle buttons were removed, setDense remains the apply path) ----
   function setDense(compact){ document.documentElement.style.setProperty('--cols',compact?'5':'4');
-    document.documentElement.style.setProperty('--gap',compact?'10px':'14px');
-    $('#dense-comf').classList.toggle('on',!compact); $('#dense-comp').classList.toggle('on',compact); }
-  $('#dense-comf').onclick=()=>setDense(false); $('#dense-comp').onclick=()=>setDense(true);
+    document.documentElement.style.setProperty('--gap',compact?'10px':'14px'); }
 
   // ---- info panel toggle ----
   $('#panelbtn').onclick=()=>{ const ip=$('#inspector'); const hidden=ip.classList.toggle('hidden'); $('#panelbtn').classList.toggle('on',!hidden); };
@@ -628,7 +605,7 @@
     for(let i=0;i<s.length;i++){const c=s[i];if(c==='"')q=!q;else if(c===','&&!q)start=i+1;}return s.slice(start).trim();}
   let acTimer=null;
   search.addEventListener('input',()=>{ if(dupeMode) exitDupes(); raw=search.value;resetGrid();requestPage();
-    updatePotSave(); tagDropFromDrop=false; updateTagBtn();
+    updatePotSave();
     clearTimeout(acTimer);acTimer=setTimeout(()=>{const t=currentTerm();if(t.length>0&&!t.includes('"'))post({type:'ac',prefix:t});else hideAc();},75);});
   search.addEventListener('keydown',e=>{
     if(acBox.style.display==='block'&&acItems.length){
@@ -651,7 +628,8 @@
     $('#pill-rename').classList.toggle('off',sel.size!==1);                 // Rename is single-selection (T34)
     $('#pill-addcol').style.display=colsCache.length>0?'flex':'none';       // hide Add-to-Collection until a collection exists
     if(!sel.size){ hideColPick(); hideMovePick(); hideMoreMenu(); }
-    relayoutBar(); }
+    relayoutBar();
+    post({type:'selchange',count:sel.size,single:sel.size===1}); }   // v2.8/T53: drive the WinForms File-menu enable/grey state (single → Rename only)
   function paintCard(idx){ const card=grid.querySelector('.card[data-idx="'+idx+'"]'); if(card) card.classList.toggle('sel',sel.has(loaded[idx].id)); }
   function selectClick(idx,e){ const id=loaded[idx].id;
     if(e.shiftKey&&lastIdx>=0){ const [a,b]=[Math.min(lastIdx,idx),Math.max(lastIdx,idx)]; for(let i=a;i<=b;i++){sel.add(loaded[i].id);paintCard(i);} }
@@ -666,6 +644,18 @@
   document.querySelectorAll('#actionbar .pill[data-op]').forEach(b=>b.onclick=()=>doOp(b.dataset.op));
   $('#selclear').onclick=clearSel;
   function doOp(op){ if(!sel.size)return; post({type:'op',op,ids:[...sel]}); }
+
+  // v2.8/T53: WinForms File menu → gallery op path. C# posts {type:'menuop',op}; we run the SAME
+  // handlers the bottom action bar uses, so C# never needs the id list (N1 token reconciliation):
+  //   move→openMovePicker · rename→promptRename · favorite→favbulk post (the ★ pill path) · copy/delete→doOp · clear→clearSel.
+  function handleMenuOp(op){
+    if(op==='clear'){ clearSel(); return; }
+    if(!sel.size) return;                                  // File items are greyed at count 0; guard anyway
+    if(op==='move') openMovePicker();
+    else if(op==='rename') promptRename();
+    else if(op==='favorite') post({type:'favbulk',ids:[...sel],on:true});
+    else if(op==='copy'||op==='delete') doOp(op);
+  }
 
   // ---- T34/F23 file-manager verbs (action bar) ----
   $('#pill-moveto').onclick=(e)=>{ e.stopPropagation(); openMovePicker(); };
@@ -683,7 +673,6 @@
       {label:'★ Favorite', on:sel.size>0, run:()=>{ if(sel.size) post({type:'favbulk',ids:[...sel],on:true}); }} ];
     if(colsCache.length) a.push({label:'＋ Add to Collection…', on:true, run:openColPicker});
     a.push({label:'⧉ Copy', on:true, run:()=>doOp('copy')});
-    a.push({label:'☠ Reject to Bog', on:true, run:()=>doOp('archive')});
     return a; }
   function openMoreMenu(){ hideMovePick(); hideColPick(); const m=$('#moremenu'); m.innerHTML='';
     moreActions().forEach(x=>{ const d=document.createElement('div'); d.textContent=x.label;
@@ -963,44 +952,13 @@
     if(colpick.style.display==='block' && !colpick.contains(e.target) && e.target.id!=='pill-addcol') hideColPick();
     const mp=$('#movepick'); if(mp.style.display==='block' && !mp.contains(e.target) && e.target.id!=='pill-moveto') hideMovePick();
     const mm=$('#moremenu'); if(mm.style.display==='block' && !mm.contains(e.target) && e.target.id!=='pill-more') hideMoreMenu();
-    const tw=$('#tagwrap'); if($('#tagdrop').style.display==='block' && !tw.contains(e.target)) hideTagDrop();
   });
 
-  // T49/F36 Tags toolbar dropdown
-  // T51/F39: two-section tagdrop — WD14 at top (#wd14-section), user tags below (#taglist-section).
-  // Both sections are requested simultaneously; each populates its own div independently.
-  function openTagDrop(){ hideColPick(); hideMovePick(); hideMoreMenu();
-    const td=$('#tagdrop');
-    td.innerHTML='<div id="wd14-section"></div><div id="taglist-section"><div class="tdrow" style="color:var(--mut)">Loading…</div></div>';
-    td.style.display='block'; post({type:'wd14info'}); post({type:'taglist'}); }
-  function hideTagDrop(){ $('#tagdrop').style.display='none'; }
-  function updateTagBtn(){ $('#tagbtn').classList.toggle('on',tagDropFromDrop); }
-  function insertTagChip(token){ const s=search.value.trimEnd(); search.value=(s?s+', ':'')+token+', '; hideAc(); raw=search.value; resetGrid(); requestPage(); search.focus(); }
-  function handleTagList(m){
-    const td=$('#taglist-section'); if(!td)return; td.innerHTML=''; const tags=m.tags||[];
-    if(tags.length===0){ const e=document.createElement('div'); e.className='tdempty';
-      e.textContent='No tags yet — open an image and add tags in the TAGS inspector tab.'; td.appendChild(e); return; }
-    if(sel.size>0){ const h=document.createElement('div'); h.className='tdhead'; h.id='tagdrop-head';
-      h.textContent='Add to '+sel.size+' selected'; td.appendChild(h); }
-    tags.forEach(t=>{ const d=document.createElement('div'); d.className='tdrow';
-      d.innerHTML='<span>'+esc(t.token)+'</span><span class="df">'+t.df+'</span>';
-      if(sel.size>0){ d.onclick=()=>{ d.innerHTML='<span style="color:var(--mut)">Adding…</span>'; d.onclick=null; post({type:'tagbulkadd',token:t.token,ids:[...sel]}); }; }
-      else { d.onclick=()=>{ insertTagChip(t.token); hideTagDrop(); tagDropFromDrop=true; updateTagBtn(); }; }
-      td.appendChild(d); }); }
-  function handleWd14Info(m){
-    const s=$('#wd14-section'); if(!s)return; s.innerHTML='';
-    const h=document.createElement('div'); h.className='tdhead'; h.textContent='⚗ WD14 TAGGER'; s.appendChild(h);
-    if(m.configured && m.count>0){
-      const r=document.createElement('div'); r.className='tdrow';
-      r.textContent='Tag untagged images ('+m.count.toLocaleString()+')';
-      r.onclick=()=>{ post({type:'wd14run'}); hideTagDrop(); }; s.appendChild(r);
-    } else if(m.configured && m.count===0){
-      const e=document.createElement('div'); e.className='tdempty'; e.textContent='All untagged images have been tagged.'; s.appendChild(e);
-    } else {
-      const r=document.createElement('div'); r.className='tdrow'; r.textContent='Set up WD14 Tagger…';
-      r.onclick=()=>{ post({type:'wd14setup'}); hideTagDrop(); }; s.appendChild(r);
-    }
-    const div=document.createElement('div'); div.style.cssText='border-top:1px solid #2a2236;margin:4px 0'; s.appendChild(div); }
+  // v2.8/T53/F42: Tags ▾ dropdown removed (toolbar is search-only). openTagDrop/hideTagDrop/updateTagBtn/
+  // insertTagChip/handleTagList/handleWd14Info + the #tagbtn wiring were deleted. Per-image WD14 (the
+  // inspector ⚗ button → handleWd14SingleDone) stays. Bulk WD14 lost its only UI trigger with the dropdown;
+  // its C# plumbing + handleWd14Done below remain dormant for a future re-exposure (see Developer Notes N1).
+  // DB GetAllUserTags/AddUserTagBulk + the C# taglist/tagbulkadd handlers are left as dead code per OQ-v28-3.
   function handleWd14Done(m){
     scanOv.classList.remove('indet');
     if(m.canceled){
@@ -1017,11 +975,6 @@
       if((m.tags||[]).length>0) panelMeta.userTags=(panelMeta.userTags||[]).concat(m.tags);
       renderTags(panelMeta);   // re-hydrates chips + restores the button onclick
     } }
-  function handleTagBulkDone(m){ const h=$('#tagdrop-head'); if(!h) return;
-    const prev=h.textContent; h.style.color='var(--acid)';
-    h.textContent='✓ Added “'+m.token+'” to '+sel.size+' image'+(sel.size===1?'':'s');
-    setTimeout(()=>{ h.textContent=prev; h.style.color=''; },2000); }
-  $('#tagbtn').onclick=()=>{ if($('#tagdrop').style.display==='block') hideTagDrop(); else openTagDrop(); };
 
   // Folders sidebar removed (F33/v2.5). foldersCache kept for the Move-to picker (shows empty gracefully).
   let foldersCache=[];
@@ -1175,9 +1128,12 @@
   function showEmpty(){ const q=search.value.trim(); const btn=$('#emptybtn');
     if(q){ $('#emptytitle').textContent='No charms match your search.'; $('#emptysub').innerHTML='Nothing matches <b>“'+esc(q)+'”</b> here.';
       btn.style.display='block'; btn.textContent='Clear Search'; btn.onclick=()=>{ search.value=''; raw=''; refresh(); }; }
-    else if(scope==='bog'){ $('#emptytitle').textContent='The Bog is empty.'; $('#emptysub').textContent='Rejected images you send to the Bog will gather here.'; btn.style.display='none'; }
-    else if(scope==='unsorted'){ $('#emptytitle').textContent='Nothing unsorted.'; $('#emptysub').textContent='Every image here already carries charms from its prompt.'; btn.style.display='none'; }
+    else if(scope==='untagged'){ $('#emptytitle').textContent='Nothing left untagged.'; $('#emptysub').textContent='Every image here already carries a tag or generation metadata. Open an image and use ⚗ Auto-Tagger to tag more.'; btn.style.display='none'; }
     else { $('#emptytitle').textContent='The hoard is quiet… for now.'; $('#emptysub').textContent='Add a source folder in Settings, then Scan to fill the cauldron.'; btn.style.display='none'; }
+    // v2.8/T53: cauldron art for the empty Untagged scope; witch-hat art everywhere else.
+    const useCauldron = !q && scope==='untagged';
+    $('#emptyhat').style.display = useCauldron ? 'none' : '';
+    $('#emptyart').style.display = useCauldron ? 'block' : 'none';
     emptyMsg.style.display='flex'; }
 
   window.chrome && window.chrome.webview && window.chrome.webview.addEventListener('message',ev=>{
@@ -1193,7 +1149,7 @@
     else if(m.type==='scandone'){ scanDone(m); }                                                  // T36/F26 completion summary
     else if(m.type==='ac'){ if(m.acTarget==='tags'){ tagAcItems=(m.items||[]).slice(0,8); tagAcSel=-1; paintTagAc(); }
       else { acItems=(m.items||[]).slice(0,8); acSel=-1; paintAc(); } }
-    else if(m.type==='counts'){ $('#cnt-all').textContent=(m.all||0).toLocaleString(); $('#cnt-unsorted').textContent=(m.unsorted||0).toLocaleString(); $('#cnt-bog').textContent=(m.bog||0).toLocaleString();
+    else if(m.type==='counts'){ $('#cnt-all').textContent=(m.all||0).toLocaleString();
       $('#cnt-favorites').textContent=(m.favorites||0)>0?(m.favorites).toLocaleString():'';
       $('#cnt-optimized').textContent=(m.optimized||0)>0?(m.optimized).toLocaleString():'';
       $('#cnt-untagged').textContent=(m.untagged||0)>0?(m.untagged).toLocaleString():''; }   // T51/F39; shown only when >0
@@ -1205,7 +1161,7 @@
       loading=false; dupeMode=true; total=m.total; addCards(m.items||[]);
       $('#cnt-dupes').textContent = m.groups>0 ? m.groups.toLocaleString() : '0';
       countEl.textContent = m.groups>0 ? (m.groups.toLocaleString()+' duplicate set'+(m.groups===1?'':'s')+' · '+m.total.toLocaleString()+' image'+(m.total===1?'':'s')) : 'No duplicates found';
-      if(m.total===0){ $('#emptytitle').textContent='No duplicates found.'; $('#emptysub').textContent=nearDupes?'No matching or near-matching images in the hoard.':'No exact matches — try “Include near-dups”.'; $('#emptybtn').style.display='none'; emptyMsg.style.display='flex'; }
+      if(m.total===0){ $('#emptytitle').textContent='No duplicates found.'; $('#emptysub').textContent=nearDupes?'No matching or near-matching images in the hoard.':'No exact matches — try “Include near-dups”.'; $('#emptybtn').style.display='none'; $('#emptyhat').style.display=''; $('#emptyart').style.display='none'; emptyMsg.style.display='flex'; }
       else emptyMsg.style.display='none'; }
     else if(m.type==='inspect'){ if(m.target==='lightbox') showLb(m); else showPanel(m); }
     else if(m.type==='reload'){ raw=search.value; if(dupeMode) runDupes(); else refresh(); post({type:'folders'}); }
@@ -1213,14 +1169,13 @@
     else if(m.type==='potions'){ renderPotNav(m.items||[]); if($('#pot-dialog').classList.contains('open')) closePotDialog(); }
     else if(m.type==='potcount'){ $('#pot-count').textContent=m.count!=null?Number(m.count).toLocaleString():'—'; }
     else if(m.type==='poterror'){ const er=$('#pot-error'); er.textContent=m.message||'Error'; er.style.display='block'; }
-    else if(m.type==='taglist'){ handleTagList(m); }
-    else if(m.type==='tagbulkdone'){ handleTagBulkDone(m); }
-    else if(m.type==='wd14info'){ handleWd14Info(m); }
     else if(m.type==='wd14done'){ handleWd14Done(m); }
-    else if(m.type==='wd14singledone'){ handleWd14SingleDone(m); } });
+    else if(m.type==='wd14singledone'){ handleWd14SingleDone(m); }
+    else if(m.type==='density'){ setDense(!!m.compact); }                      // v2.8/T53: View-menu density (init reply + each change)
+    else if(m.type==='menuop'){ handleMenuOp(m.op); } });                      // v2.8/T53: WinForms File menu → gallery op path
 
   new IntersectionObserver(es=>{ if(es[0].isIntersecting) requestPage(); },{root:scroll,rootMargin:'400px'}).observe($('#sentinel'));
-  requestPage(); post({type:'counts'}); post({type:'cols'}); post({type:'folders'}); post({type:'potions'});   // T28/T33 sidebars + F32 Potions
+  requestPage(); post({type:'counts'}); post({type:'cols'}); post({type:'folders'}); post({type:'potions'}); post({type:'getdensity'});   // T28/T33 sidebars + F32 Potions + v2.8/T53 density pull
 })();
 </script>
 </body>

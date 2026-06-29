@@ -30,6 +30,10 @@ public sealed class AppSettings
     /// <summary>T50/F39: WD14 score threshold — tags scoring at or above this are applied (default 0.35).</summary>
     public float WdThreshold { get; set; } = 0.35f;
 
+    /// <summary>v2.8/F43 (OQ-v28-2): gallery density. false = Comfortable (default), true = Compact.
+    /// Driven by the View menu; pushed to the gallery via the {type:'density'} bridge message.</summary>
+    public bool Compact { get; set; }
+
     /// <summary>Civitai harvest parameters (T17 secondary mode).</summary>
     public HarvestOptions Harvest { get; set; } = new();
 

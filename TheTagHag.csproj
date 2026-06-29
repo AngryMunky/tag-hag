@@ -8,7 +8,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>TheTagHag</RootNamespace>
     <AssemblyName>TheTagHag</AssemblyName>
-    <Version>2.7.2</Version>
+    <Version>2.8.0</Version>
     <Authors>Angry Munky</Authors>
     <Company>Angry Munky</Company>
     <Product>The Tag Hag</Product>
@@ -55,6 +55,8 @@
     <EmbeddedResource Include="Resources\app.ico" />
     <!-- Brand lockup (hag + TAG HAG) shown in the sidebar; extracted next to the app page at runtime. -->
     <EmbeddedResource Include="Resources\logo-lockup.png" />
+    <!-- Dark iron cauldron illustration for sidebar empty states (Potions, Collections, Library scopes). -->
+    <EmbeddedResource Include="Resources\cauldron-empty.png" />
   </ItemGroup>
 
   <!-- NOTE: ProtectedData / TaskScheduler arrive with their tickets (T16/T17). -->

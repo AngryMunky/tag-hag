@@ -16,7 +16,12 @@ public sealed class MainForm : Form
     private readonly bool _isFreshInstall;   // T37: true when no settings file existed before first Load
     private AppSettings _settings;
     private readonly WebView2 _web = new() { Dock = DockStyle.Fill };
-    private readonly ToolStrip _tb = new() { GripStyle = ToolStripGripStyle.Hidden };
+    private readonly MenuStrip _menu = new();   // v2.8/F43: replaces the ToolStrip
+    // File-menu items kept as fields so UpdateFileMenu() can grey/enable them by selection.
+    private ToolStripMenuItem _miMove = null!, _miRename = null!, _miDelete = null!, _miFav = null!, _miCopy = null!, _miClear = null!;
+    private ToolStripMenuItem _miComfortable = null!, _miCompact = null!;   // View density (radio)
+    private int _selCount;     // cached gallery selection count (from the selchange bridge message)
+    private bool _selSingle;   // exactly one image selected
     private readonly ToolStripStatusLabel _statusLabel = new("Ready") { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
     private readonly StatusStrip _status = new() { SizingGrip = false };
 
@@ -42,41 +47,92 @@ public sealed class MainForm : Form
         BackColor = Color.FromArgb(0x14, 0x10, 0x18);
         RestoreWindowBounds();
 
-        BuildToolbar();
+        BuildMenuStrip();
         _status.BackColor = Color.FromArgb(0x1B, 0x16, 0x22);
         _status.ForeColor = Color.FromArgb(0xD8, 0xD0, 0xBF);
         _status.Items.Add(_statusLabel);
 
         Controls.Add(_web);
         Controls.Add(_status);
-        Controls.Add(_tb);
+        Controls.Add(_menu);
+        MainMenuStrip = _menu;
 
         Load += async (_, _) => await InitAsync();
         FormClosing += (_, _) => { SaveWindowBounds(); _thumbs?.Dispose(); _db?.Dispose(); };
     }
 
-    private void BuildToolbar()
+    /// <summary>v2.8/F43: the Windows menu bar (File · Folders · View · CivitAI · Settings · About),
+    /// replacing the old ToolStrip. File items are context-aware (greyed by gallery selection via the
+    /// selchange bridge); View drives gallery density; CivitAI/Settings/About are top-level clicks.</summary>
+    private void BuildMenuStrip()
     {
-        _tb.BackColor = Color.FromArgb(0x1B, 0x16, 0x22);
-        _tb.ForeColor = Color.FromArgb(0xD8, 0xD0, 0xBF);
-        _tb.Items.Add(Btn("Add source folder", AddSourceFolder));
-        _tb.Items.Add(Btn("Scan", async () => await DoScan()));
-        _tb.Items.Add(Btn("Optimize Library…", OpenOptimizeLibrary));   // T30 / F20
-        var more = new ToolStripDropDownButton("⋯") {
-            DisplayStyle = ToolStripItemDisplayStyle.Text,
-            ToolTipText  = "Civitai · Settings · About"
-        };
-        more.DropDownItems.Add(new ToolStripMenuItem("Civitai",  null, (_, _) => OpenCivitai()));
-        more.DropDownItems.Add(new ToolStripMenuItem("Settings", null, async (_, _) => await OpenSettings()));
-        more.DropDownItems.Add(new ToolStripMenuItem("About",    null, (_, _) => ShowAbout()));
-        _tb.Items.Add(more);
+        _menu.BackColor = Color.FromArgb(0x1B, 0x16, 0x22);
+        _menu.ForeColor = Color.FromArgb(0xD8, 0xD0, 0xBF);
+
+        // File — file-manager actions on the current selection (run via the gallery's own op path).
+        var file = new ToolStripMenuItem("&File");
+        _miMove   = FileItem("Move…",             "move",     "Ctrl+M");
+        _miRename = FileItem("Rename",            "rename",   "F2");
+        _miDelete = FileItem("Delete",            "delete",   "Del");
+        _miFav    = FileItem("Toggle Favorite ★", "favorite", null);
+        _miCopy   = FileItem("Copy…",             "copy",     null);
+        _miClear  = FileItem("Clear Selection",   "clear",    null);
+        file.DropDownItems.AddRange(new ToolStripItem[]
+            { _miMove, _miRename, _miDelete, _miFav, _miCopy, new ToolStripSeparator(), _miClear });
+
+        // Folders — library management (always enabled).
+        var folders = new ToolStripMenuItem("Fol&ders");
+        folders.DropDownItems.Add(new ToolStripMenuItem("Add Source Folder", null, (_, _) => AddSourceFolder()));
+        folders.DropDownItems.Add(new ToolStripMenuItem("Scan", null, async (_, _) => await DoScan()));
+        folders.DropDownItems.Add(new ToolStripMenuItem("Optimize Library…", null, (_, _) => OpenOptimizeLibrary()));
+
+        // View — gallery density (mutually-exclusive checks; persisted in AppSettings.Compact).
+        var view = new ToolStripMenuItem("&View");
+        _miComfortable = new ToolStripMenuItem("Comfortable", null, (_, _) => SetDensity(false)) { Checked = !_settings.Compact };
+        _miCompact     = new ToolStripMenuItem("Compact",     null, (_, _) => SetDensity(true))  { Checked = _settings.Compact };
+        view.DropDownItems.Add(_miComfortable);
+        view.DropDownItems.Add(_miCompact);
+
+        // Top-level click items (no submenu) — match the retired ⋯ dropdown behaviour.
+        var civitai  = new ToolStripMenuItem("&CivitAI",  null, (_, _) => OpenCivitai());
+        var settings = new ToolStripMenuItem("&Settings", null, async (_, _) => await OpenSettings());
+        var about    = new ToolStripMenuItem("&About",    null, (_, _) => ShowAbout());
+
+        _menu.Items.AddRange(new ToolStripItem[] { file, folders, view, civitai, settings, about });
+        UpdateFileMenu();
     }
 
-    private static ToolStripButton Btn(string text, Action onClick)
+    /// <summary>A File-menu item that triggers the gallery's selection-op via the menuop bridge.
+    /// `shortcutDisplay` is DISPLAY-ONLY (OQ-v28-5) — no functional ShortcutKeys are bound, so the
+    /// gallery's own key handling (Del/Ctrl+A/Esc) is never double-fired.</summary>
+    private ToolStripMenuItem FileItem(string text, string op, string? shortcutDisplay)
     {
-        var b = new ToolStripButton(text) { DisplayStyle = ToolStripItemDisplayStyle.Text };
-        b.Click += (_, _) => onClick();
-        return b;
+        var it = new ToolStripMenuItem(text, null, (_, _) => PostMenuOp(op));
+        if (shortcutDisplay is not null) it.ShortcutKeyDisplayString = shortcutDisplay;
+        return it;
+    }
+
+    private void PostMenuOp(string op) =>
+        _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "menuop", op }));
+
+    /// <summary>Switch gallery density, persist it, update the View checkmarks, and push it to the gallery.</summary>
+    private void SetDensity(bool compact)
+    {
+        if (_settings.Compact == compact) { _miComfortable.Checked = !compact; _miCompact.Checked = compact; return; }
+        _settings.Compact = compact;
+        SettingsStore.Save(_settings);
+        _miComfortable.Checked = !compact;
+        _miCompact.Checked = compact;
+        _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "density", compact }));
+    }
+
+    /// <summary>Enable/grey the File-menu items from the cached gallery selection (selchange bridge).</summary>
+    private void UpdateFileMenu()
+    {
+        if (_miMove is null) return;   // not built yet
+        bool any = _selCount > 0;
+        _miMove.Enabled = any; _miDelete.Enabled = any; _miFav.Enabled = any; _miCopy.Enabled = any; _miClear.Enabled = any;
+        _miRename.Enabled = _selSingle;   // single-image operation
     }
 
     /// <summary>About dialog: name / version / tagline + a clickable link to the public repo.</summary>
@@ -169,6 +225,7 @@ public sealed class MainForm : Form
         Directory.CreateDirectory(uiDir);
         File.WriteAllText(Path.Combine(uiDir, "index.html"), LoadTemplate());
         WriteEmbeddedAsset("logo-lockup.png", Path.Combine(uiDir, "logo-lockup.png")); // brand lockup for the sidebar
+        WriteEmbeddedAsset("cauldron-empty.png", Path.Combine(uiDir, "cauldron-empty.png")); // v2.8: sidebar empty-state art
         _web.CoreWebView2.SetVirtualHostNameToFolderMapping("app.local", uiDir, CoreWebView2HostResourceAccessKind.Allow);
 
         _web.CoreWebView2.Navigate("https://app.local/index.html");
@@ -293,6 +350,18 @@ public sealed class MainForm : Form
                 var near = d.RootElement.TryGetProperty("near", out var nr) && nr.ValueKind == JsonValueKind.True;
                 var gen = d.RootElement.TryGetProperty("gen", out var gg) && gg.ValueKind == JsonValueKind.Number ? gg.GetInt32() : 0;
                 _ = HandleDupes(near, gen);
+                return;
+            }
+            if (type == "selchange")   // v2.8/F43: gallery selection → File-menu enable/grey state
+            {
+                _selCount = d.RootElement.TryGetProperty("count", out var sc) && sc.ValueKind == JsonValueKind.Number ? sc.GetInt32() : 0;
+                _selSingle = d.RootElement.TryGetProperty("single", out var sg) && sg.ValueKind == JsonValueKind.True;
+                UpdateFileMenu();
+                return;
+            }
+            if (type == "getdensity")  // v2.8/F43: gallery requests persisted density on init (pull model)
+            {
+                _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "density", compact = _settings.Compact }));
                 return;
             }
             // ---- v2.0 host-side write intercepts (Favorites/Notes/Collections). Fast single-writer
