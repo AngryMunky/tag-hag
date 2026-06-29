@@ -405,9 +405,9 @@ CREATE INDEX IF NOT EXISTS ix_potions_sort ON potions(sort_order, id);");
     /// Search: comma-AND tokens (image_tags join + HAVING COUNT(DISTINCT)=N) plus one
     /// prompt LIKE per quoted phrase, plus the archived filter. Returns a page + total count.
     /// </summary>
-    public (IReadOnlyList<ImageRow> Page, int Total) Query(SearchFilter f, int page, int size, bool includeArchived, bool untaggedOnly = false, bool archivedOnly = false, bool favoritesOnly = false, long? collectionId = null, bool optimizedOnly = false, string? folderPath = null, string? folderRoot = null, bool includeSubfolders = false, bool includeSubcollections = false)
+    public (IReadOnlyList<ImageRow> Page, int Total) Query(SearchFilter f, int page, int size, bool includeArchived, bool untaggedOnly = false, bool archivedOnly = false, bool favoritesOnly = false, long? collectionId = null, bool optimizedOnly = false, string? folderPath = null, string? folderRoot = null, bool includeSubfolders = false, bool includeSubcollections = false, bool noMetadataUntaggedOnly = false)
     {
-        var (fromWhere, ps) = BuildFromWhere(f, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders, includeSubcollections);
+        var (fromWhere, ps) = BuildFromWhere(f, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders, includeSubcollections, noMetadataUntaggedOnly);
 
         int total = f.Tokens.Count > 0
             ? Convert.ToInt32(Scalar($"SELECT COUNT(*) FROM (SELECT i.id {fromWhere});", ps.ToArray()) ?? 0)
@@ -431,7 +431,7 @@ CREATE INDEX IF NOT EXISTS ix_potions_sort ON potions(sort_order, id);");
     /// EXACT same predicate — keeping "select all in the current view" identical to what the grid shows
     /// and preserving the single-fromWhere page==total invariant. The token branch ends in
     /// GROUP BY i.id HAVING …; the no-token branch is a plain WHERE.</summary>
-    private (string FromWhere, List<(string, object)> Ps) BuildFromWhere(SearchFilter f, bool includeArchived, bool untaggedOnly, bool archivedOnly, bool favoritesOnly, long? collectionId, bool optimizedOnly, string? folderPath, string? folderRoot, bool includeSubfolders, bool includeSubcollections = false)
+    private (string FromWhere, List<(string, object)> Ps) BuildFromWhere(SearchFilter f, bool includeArchived, bool untaggedOnly, bool archivedOnly, bool favoritesOnly, long? collectionId, bool optimizedOnly, string? folderPath, string? folderRoot, bool includeSubfolders, bool includeSubcollections = false, bool noMetadataUntaggedOnly = false)
     {
         var where = new List<string>();
         var ps = new List<(string, object)>();
@@ -439,6 +439,8 @@ CREATE INDEX IF NOT EXISTS ix_potions_sort ON potions(sort_order, id);");
         else if (!includeArchived) where.Add("i.archived=0");
         // "Untagged only": images the parser found no tags for (metadata-free, or prompt all-stopwords).
         if (untaggedOnly) where.Add("i.id NOT IN (SELECT image_id FROM image_tags)");
+        // T50/F39 "Untagged (WD14)" scope: no prompt metadata AND no user tags.
+        if (noMetadataUntaggedOnly) { where.Add("i.meta_format='none'"); where.Add("i.id NOT IN (SELECT image_id FROM user_tags)"); }
         // v2.0 scope filters — folded into the SAME where list so they apply in BOTH the token and
         // no-token branches AND the COUNT (one fromWhere → page==total, no desync).
         if (favoritesOnly) where.Add("i.favorite=1");                                  // Favorites view (T24)
@@ -522,9 +524,9 @@ CREATE INDEX IF NOT EXISTS ix_potions_sort ON potions(sort_order, id);");
     /// the current view"). Reuses <see cref="BuildFromWhere"/> so the id set is identical to what the
     /// grid is paging through (its Count equals Query's Total). SELECT i.id only — no row hydration.
     /// The token branch's GROUP BY i.id yields one row per matching image, so ids are distinct.</summary>
-    public IReadOnlyList<long> QueryAllIds(SearchFilter f, bool includeArchived, bool untaggedOnly = false, bool archivedOnly = false, bool favoritesOnly = false, long? collectionId = null, bool optimizedOnly = false, string? folderPath = null, string? folderRoot = null, bool includeSubfolders = false, bool includeSubcollections = false)
+    public IReadOnlyList<long> QueryAllIds(SearchFilter f, bool includeArchived, bool untaggedOnly = false, bool archivedOnly = false, bool favoritesOnly = false, long? collectionId = null, bool optimizedOnly = false, string? folderPath = null, string? folderRoot = null, bool includeSubfolders = false, bool includeSubcollections = false, bool noMetadataUntaggedOnly = false)
     {
-        var (fromWhere, ps) = BuildFromWhere(f, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders, includeSubcollections);
+        var (fromWhere, ps) = BuildFromWhere(f, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders, includeSubcollections, noMetadataUntaggedOnly);
         var list = new List<long>();
         using var cmd = _con.CreateCommand();
         cmd.CommandText = $"SELECT i.id {fromWhere} ORDER BY i.id;";
@@ -940,6 +942,24 @@ CREATE INDEX IF NOT EXISTS ix_potions_sort ON potions(sort_order, id);");
     public long OptimizedCount() =>
         Convert.ToInt64(Scalar("SELECT COUNT(*) FROM images WHERE optimized=1 AND archived=0;") ?? 0L);
 
+    /// <summary>T50/F39 — Count of non-archived images that have no prompt metadata AND no user tags.
+    /// Powers the "Untagged" sidebar badge and the WD14 tagdrop count.</summary>
+    public long CountNoMetadataUntagged() =>
+        Convert.ToInt64(Scalar(
+            "SELECT COUNT(*) FROM images WHERE meta_format='none' AND archived=0 AND id NOT IN (SELECT image_id FROM user_tags);") ?? 0L);
+
+    /// <summary>T50/F39 — IDs and absolute paths for the WD14 bulk run. Captured before the run starts
+    /// (not live-queried mid-loop) so newly-tagged images during the run are not re-processed.</summary>
+    public IReadOnlyList<(long Id, string AbsPath)> GetWd14BatchItems()
+    {
+        var list = new List<(long, string)>();
+        using var cmd = _con.CreateCommand();
+        cmd.CommandText = "SELECT id, abs_path FROM images WHERE meta_format='none' AND archived=0 AND id NOT IN (SELECT image_id FROM user_tags) ORDER BY id;";
+        using var rd = cmd.ExecuteReader();
+        while (rd.Read()) list.Add((rd.GetInt64(0), rd.GetString(1)));
+        return list;
+    }
+
     /// <summary>Upsert the per-image note (empty body clears it to ''); stamps updated_at (local ISO).</summary>
     public void SetNote(long id, string body) =>
         Exec("INSERT INTO image_notes(image_id, body, updated_at) VALUES($id,$b,$u) " +
@@ -1011,6 +1031,24 @@ CREATE INDEX IF NOT EXISTS ix_potions_sort ON potions(sort_order, id);");
         }
         tx.Commit();
         return inserted;
+    }
+
+    /// <summary>T50/F39 — Write WD14-inferred tags for one image in one transaction (inverse of
+    /// AddUserTagBulk which is one token → many images). INSERT OR IGNORE — idempotent; calling
+    /// twice with the same tokens produces no duplicate rows and does not corrupt user_tag_freq.</summary>
+    public void AddUserTagsForImage(long imageId, IEnumerable<string> tokens)
+    {
+        var list = tokens.Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
+        if (list.Count == 0) return;
+        using var tx = _con.BeginTransaction();
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.CommandText = "INSERT OR IGNORE INTO user_tags(image_id, token) VALUES($id,$t);";
+            cmd.Parameters.AddWithValue("$id", imageId);
+            var pT = cmd.Parameters.Add("$t", SqliteType.Text);
+            foreach (var token in list) { pT.Value = token; cmd.ExecuteNonQuery(); }
+        }
+        tx.Commit();
     }
 
     private IReadOnlyList<string> TokenList(string table, long id)

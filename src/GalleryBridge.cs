@@ -68,6 +68,7 @@ public sealed class GalleryBridge
         var archivedOnly = root.TryGetProperty("archivedOnly", out var ao) && ao.ValueKind == JsonValueKind.True;
         var favoritesOnly = root.TryGetProperty("favoritesOnly", out var fo) && fo.ValueKind == JsonValueKind.True;
         var optimizedOnly = root.TryGetProperty("optimizedOnly", out var oo) && oo.ValueKind == JsonValueKind.True;   // T31
+        var noMetadataUntaggedOnly = root.TryGetProperty("noMetadataUntaggedOnly", out var nmuo) && nmuo.ValueKind == JsonValueKind.True;  // T51/F39
         long? collectionId = root.TryGetProperty("collectionId", out var ci) && ci.ValueKind == JsonValueKind.Number ? ci.GetInt64() : (long?)null;
         var includeSubcollections = root.TryGetProperty("includeSubcollections", out var isc) && isc.ValueKind == JsonValueKind.True;  // T41
         // Folder view (T33): folderPath is a rel-DIR ("" = root-level), folderRoot scopes it to one
@@ -78,7 +79,7 @@ public sealed class GalleryBridge
         // Generation token: the page echoes it so the client can drop replies from a superseded query.
         var gen = root.TryGetProperty("gen", out var g) && g.ValueKind == JsonValueKind.Number ? g.GetInt32() : 0;
 
-        var (rows, total) = _db.Query(SearchParser.Parse(raw), page, size, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders, includeSubcollections);
+        var (rows, total) = _db.Query(SearchParser.Parse(raw), page, size, includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders, includeSubcollections, noMetadataUntaggedOnly);
         var items = rows.Select(x => new
         {
             id = x.Id,
@@ -103,13 +104,14 @@ public sealed class GalleryBridge
         var archivedOnly = root.TryGetProperty("archivedOnly", out var ao) && ao.ValueKind == JsonValueKind.True;
         var favoritesOnly = root.TryGetProperty("favoritesOnly", out var fo) && fo.ValueKind == JsonValueKind.True;
         var optimizedOnly = root.TryGetProperty("optimizedOnly", out var oo) && oo.ValueKind == JsonValueKind.True;
+        var noMetadataUntaggedOnly = root.TryGetProperty("noMetadataUntaggedOnly", out var nmuo) && nmuo.ValueKind == JsonValueKind.True;  // T51/F39
         long? collectionId = root.TryGetProperty("collectionId", out var ci) && ci.ValueKind == JsonValueKind.Number ? ci.GetInt64() : (long?)null;
         var includeSubcollections = root.TryGetProperty("includeSubcollections", out var isc) && isc.ValueKind == JsonValueKind.True;  // T41
         var folderPath = root.TryGetProperty("folderPath", out var fp) && fp.ValueKind == JsonValueKind.String ? fp.GetString() : null;
         var folderRoot = root.TryGetProperty("folderRoot", out var fr) && fr.ValueKind == JsonValueKind.String ? fr.GetString() : null;
         var includeSubfolders = root.TryGetProperty("includeSubfolders", out var isf) && isf.ValueKind == JsonValueKind.True;
         var gen = root.TryGetProperty("gen", out var g) && g.ValueKind == JsonValueKind.Number ? g.GetInt32() : 0;   // echoed so the client drops a stale select-all after a view switch
-        var ids = _db.QueryAllIds(SearchParser.Parse(raw), includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders, includeSubcollections);
+        var ids = _db.QueryAllIds(SearchParser.Parse(raw), includeArchived, untaggedOnly, archivedOnly, favoritesOnly, collectionId, optimizedOnly, folderPath, folderRoot, includeSubfolders, includeSubcollections, noMetadataUntaggedOnly);
         return JsonSerializer.Serialize(new { type = "allids", gen, ids }, Json);
     }
 
@@ -121,7 +123,8 @@ public sealed class GalleryBridge
         long unsorted = _db.UntaggedCount();
         long favorites = _db.FavoriteCount();
         long optimized = _db.OptimizedCount();   // T31
-        return JsonSerializer.Serialize(new { type = "counts", all, unsorted, bog, favorites, optimized }, Json);
+        long untagged = _db.CountNoMetadataUntagged();  // T50/F39 — "Untagged" sidebar scope
+        return JsonSerializer.Serialize(new { type = "counts", all, unsorted, bog, favorites, optimized, untagged }, Json);
     }
 
     /// <summary>T30 Library Optimization preview: a cheap (count, skip, est bytes) tally for a scope at a

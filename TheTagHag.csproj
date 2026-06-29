@@ -8,7 +8,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>TheTagHag</RootNamespace>
     <AssemblyName>TheTagHag</AssemblyName>
-    <Version>2.6.0</Version>
+    <Version>2.7.0</Version>
     <Authors>Angry Munky</Authors>
     <Company>Angry Munky</Company>
     <Product>The Tag Hag</Product>
@@ -36,6 +36,9 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.*" />
     <!-- EXIF (JPEG/WebP) read + later resize/thumbnail (T14/T15). -->
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
+    <!-- WD14 ONNX inference (T50/F39). IncludeNativeLibrariesForSelfExtract=true (already set) bundles
+         onnxruntime.dll inside the single-file exe — no loose DLLs. CPU-only; DirectML → v2.8. -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.19.2" />
     <!-- Gallery host (T10). -->
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
     <!-- PNG CRC-32 (ISO-HDLC) for re-splicing metadata chunks on downsample (T14). -->

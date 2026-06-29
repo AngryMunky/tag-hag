@@ -22,6 +22,8 @@ public sealed class SettingsForm : Form
     private readonly RadioButton _modeMoveOnly = new();
     private readonly NumericUpDown _maxDim = new();
     private readonly TextBox _apiKey = new();
+    private readonly TextBox _wdModelPath = new();
+    private readonly NumericUpDown _wdThreshold = new();
 
     public List<string> SourceRoots => _roots.Items.Cast<string>().ToList();
     public string? ExportDir => string.IsNullOrWhiteSpace(_export.Text) ? null : _export.Text.Trim();
@@ -29,6 +31,8 @@ public sealed class SettingsForm : Form
     public OptimizeMode DefaultMode => _modeMoveOnly.Checked ? OptimizeMode.MoveOnly : OptimizeMode.Downsample;
     public int MaxDim => (int)_maxDim.Value;
     public string ApiKey => _apiKey.Text;
+    public string? WdModelPath => string.IsNullOrWhiteSpace(_wdModelPath.Text) ? null : _wdModelPath.Text.Trim();
+    public float WdThreshold => (float)_wdThreshold.Value;
 
     public SettingsForm(AppSettings s)
     {
@@ -37,7 +41,7 @@ public sealed class SettingsForm : Form
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false; MaximizeBox = false; ShowInTaskbar = false;
-        ClientSize = new Size(520, 494);
+        ClientSize = new Size(520, 630);
         BackColor = Bg; ForeColor = Bone;
         Font = new Font("Segoe UI", 9f);
 
@@ -113,9 +117,45 @@ public sealed class SettingsForm : Form
         var showKey = new CheckBox { Text = "Show", AutoSize = true, ForeColor = Mut, Location = new Point(400, 406) };
         showKey.CheckedChanged += (_, _) => _apiKey.UseSystemPasswordChar = !showKey.Checked;
 
-        var save = new Button { Text = "Save", DialogResult = DialogResult.OK, Location = new Point(328, 454), Width = 84, FlatStyle = FlatStyle.Flat, ForeColor = Bg, BackColor = Acid };
+        // WD14 Tagger section (T50/F39)
+        var wdHeader = new Label { Text = "WD14 Tagger", ForeColor = Acid, AutoSize = true, Location = new Point(16, 442), Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
+        var wdModelLabel = new Label { Text = "Model file (.onnx):", AutoSize = true, Location = new Point(16, 462) };
+        _wdModelPath.Location = new Point(16, 478); _wdModelPath.Size = new Size(272, 24);
+        _wdModelPath.ReadOnly = true; _wdModelPath.BackColor = Panel; _wdModelPath.ForeColor = Bone; _wdModelPath.BorderStyle = BorderStyle.FixedSingle;
+        _wdModelPath.Text = s.WdModelPath ?? "";
+        var wdBrowseBtn = MakeBtn("Browse…", new Point(296, 477)); wdBrowseBtn.Width = 80;
+        wdBrowseBtn.Click += (_, _) =>
+        {
+            using var dlg = new OpenFileDialog { Title = "Select WD14 ONNX model", Filter = "ONNX model (*.onnx)|*.onnx" };
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            var csvPath = Path.Combine(Path.GetDirectoryName(dlg.FileName)!, "selected_tags.csv");
+            if (!File.Exists(csvPath))
+            {
+                MessageBox.Show(this, "selected_tags.csv not found beside the selected .onnx file.\nBoth files must be in the same folder.", "WD14 Setup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            _wdModelPath.Text = dlg.FileName;
+        };
+        var wdFindBtn = MakeBtn("Find auto", new Point(382, 477)); wdFindBtn.Width = 88;
+        wdFindBtn.Click += (_, _) =>
+        {
+            var found = Wd14Tagger.FindAutomatic();
+            if (found is not null) _wdModelPath.Text = found;
+            else MessageBox.Show(this, "No WD14 model found in known locations.\n(A1111 interrogate, ComfyUI clip_vision, exe directory)", "WD14 Setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        };
+        var wdDownload = new LinkLabel { Text = "Download WD14 model (HuggingFace)", AutoSize = true, Location = new Point(16, 510), ForeColor = Color.FromArgb(0x8A, 0xB4, 0xF8) };
+        wdDownload.LinkColor = wdDownload.ForeColor;
+        wdDownload.LinkClicked += (_, _) => System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("https://huggingface.co/SmilingWolf/wd-vit-large-tagger-v3") { UseShellExecute = true });
+        var wdThreshLabel = new Label { Text = "Score threshold:", AutoSize = true, Location = new Point(16, 533) };
+        _wdThreshold.Minimum = 0.01m; _wdThreshold.Maximum = 1.00m; _wdThreshold.Increment = 0.01m; _wdThreshold.DecimalPlaces = 2;
+        _wdThreshold.Value = Math.Clamp((decimal)s.WdThreshold, 0.01m, 1.00m);
+        _wdThreshold.Location = new Point(232, 530); _wdThreshold.Width = 90;
+        _wdThreshold.BackColor = Panel; _wdThreshold.ForeColor = Bone; _wdThreshold.BorderStyle = BorderStyle.FixedSingle;
+        var wdHint = new Label { Text = "(tags scoring at or above this threshold are applied; default 0.35)", AutoSize = true, Location = new Point(16, 554), ForeColor = Mut, Font = new Font("Segoe UI", 8f) };
+
+        var save = new Button { Text = "Save", DialogResult = DialogResult.OK, Location = new Point(328, 588), Width = 84, FlatStyle = FlatStyle.Flat, ForeColor = Bg, BackColor = Acid };
         save.FlatAppearance.BorderSize = 0;
-        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(420, 454), Width = 84, FlatStyle = FlatStyle.Flat, ForeColor = Bone, BackColor = Panel };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(420, 588), Width = 84, FlatStyle = FlatStyle.Flat, ForeColor = Bone, BackColor = Panel };
         cancel.FlatAppearance.BorderColor = Border;
 
         AcceptButton = save; CancelButton = cancel;
@@ -126,6 +166,8 @@ public sealed class SettingsForm : Form
             modeLabel, _modeDownsample, _modeMoveOnly,
             dimLabel, _maxDim,
             keyLabel, _apiKey, showKey,
+            wdHeader, wdModelLabel, _wdModelPath, wdBrowseBtn, wdFindBtn, wdDownload,
+            wdThreshLabel, _wdThreshold, wdHint,
             save, cancel });
     }
 

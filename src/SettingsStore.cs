@@ -25,6 +25,11 @@ public sealed class AppSettings
     /// <summary>Default max longest-edge for downsample/optimize (T14).</summary>
     public int MaxDim { get; set; } = 1024;
 
+    /// <summary>T50/F39: Path to the WD14 ONNX model file (.onnx). Null = not configured.</summary>
+    public string? WdModelPath { get; set; }
+    /// <summary>T50/F39: WD14 score threshold — tags scoring at or above this are applied (default 0.35).</summary>
+    public float WdThreshold { get; set; } = 0.35f;
+
     /// <summary>Civitai harvest parameters (T17 secondary mode).</summary>
     public HarvestOptions Harvest { get; set; } = new();
 

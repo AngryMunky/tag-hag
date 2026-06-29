@@ -342,6 +342,7 @@
       <div class="navrow" data-scope="dupes" title="Find duplicate images"><span class="l"><span class="ico" style="color:#a98fd6">⧉</span>Duplicates</span><span class="cnt" id="cnt-dupes"></span></div>
       <div class="navrow" data-scope="favorites"><span class="l"><span class="ico" style="color:#C7A252">★</span>Favorites</span><span class="cnt" id="cnt-favorites"></span></div>
       <div class="navrow" data-scope="optimized"><span class="l"><span class="ico" style="color:#A4FF6A">✨</span>Optimized</span><span class="cnt" id="cnt-optimized"></span></div>
+      <div class="navrow" data-scope="untagged"><span class="l"><span class="ico" style="color:#a98fd6">⚗</span>Untagged</span><span class="cnt" id="cnt-untagged">—</span></div>
       <div class="navrow" data-scope="bog"><span class="l"><span class="ico" style="color:#d68aa0">☠</span>The Bog</span><span class="cnt" id="cnt-bog">—</span></div>
     </nav>
 
@@ -467,6 +468,9 @@
           <div id="ptag-chips" class="chips"></div>
           <div class="ip-h" style="margin-top:16px">Your Tags</div>
           <div id="utag-chips" class="chips"></div>
+          <div id="wd14-btn-wrap" style="display:none;margin-top:12px">
+            <div class="tbtn" id="wd14-single-btn">⚗ Tag with WD14</div>
+          </div>
           <input id="tagadd" autocomplete="off" spellcheck="false" placeholder="Add a tag, Enter to save…" />
           <div id="tagac"></div>
           <button class="ip-btn" id="ip-suggest" style="margin-top:14px">✨ Suggest tags from similar images</button>
@@ -570,7 +574,7 @@
   let loaded=[], cur=-1, curMeta=null, panelIdx=-1, panelMeta=null, tab='info';
   let sel=new Set(), lastIdx=-1;
   let dupeMode=false, nearDupes=false;
-  const TITLES={all:'All Images',unsorted:'Unsorted',bog:'The Bog',dupes:'Duplicates',favorites:'Favorites',optimized:'Optimized'};
+  const TITLES={all:'All Images',unsorted:'Unsorted',bog:'The Bog',dupes:'Duplicates',favorites:'Favorites',optimized:'Optimized',untagged:'Untagged'};
   // T46/F32 Potions state
   let activePotion=null;                            // {pid,name,query} or null when no Potion is active
   let potDialogMode='create',potDialogPid=null;
@@ -581,7 +585,8 @@
   function post(m){ if(window.chrome&&window.chrome.webview) window.chrome.webview.postMessage(JSON.stringify(m)); }
   function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
   function flags(){ if(scope==='unsorted')return{untaggedOnly:true}; if(scope==='bog')return{archivedOnly:true};
-    if(scope==='favorites')return{favoritesOnly:true}; if(scope==='optimized')return{optimizedOnly:true}; if(scope==='col')return{collectionId:currentCid,includeSubcollections:collSubtree};
+    if(scope==='favorites')return{favoritesOnly:true}; if(scope==='optimized')return{optimizedOnly:true}; if(scope==='untagged')return{noMetadataUntaggedOnly:true};
+    if(scope==='col')return{collectionId:currentCid,includeSubcollections:collSubtree};
     if(scope==='folder')return{folderPath:currentFolderPath, folderRoot:currentFolderRoot, includeSubfolders:folderSubtree}; return {}; }
   function deactivatePotionSilent(){ if(!activePotion)return; activePotion=null;
     $('#searchbox').style.display=''; $('#pot-active-strip').style.display='none';
@@ -871,7 +876,13 @@
   function renderTags(m){ const pc=$('#ptag-chips'), uc=$('#utag-chips'); pc.innerHTML=''; uc.innerHTML='';
     (m.promptTags||[]).forEach(t=>pc.appendChild(chip(t,false)));
     if(!(m.promptTags||[]).length) pc.innerHTML='<span class="ipempty" style="padding:4px 0">No prompt charms.</span>';
-    (m.userTags||[]).forEach(t=>uc.appendChild(chip(t,true,()=>{ if(panelMeta) post({type:'tagdel',id:panelMeta.id,token:t}); }))); }
+    (m.userTags||[]).forEach(t=>uc.appendChild(chip(t,true,()=>{ if(panelMeta) post({type:'tagdel',id:panelMeta.id,token:t}); })));
+    // T51/F39: show WD14 per-image button only for untagged-format images
+    const wrap=$('#wd14-btn-wrap'); const btn=$('#wd14-single-btn');
+    if(wrap && btn && m.format==='none'){
+      wrap.style.display='block';
+      btn.onclick=()=>{ btn.textContent='⚗ Tagging…'; btn.onclick=null; post({type:'wd14single',id:m.id}); };
+    } else if(wrap){ wrap.style.display='none'; } }
   function renderNote(m){ $('#note-edit').value=m.note||'';
     $('#note-meta').textContent=m.noteUpdatedAt?('Last edited '+m.noteUpdatedAt.replace('T',' ')):(m.note?'':'Not yet noted.'); }
   $('#note-edit').addEventListener('blur',()=>{ if(panelMeta) post({type:'note',id:panelMeta.id,body:$('#note-edit').value}); });
@@ -957,13 +968,17 @@
   });
 
   // T49/F36 Tags toolbar dropdown
+  // T51/F39: two-section tagdrop — WD14 at top (#wd14-section), user tags below (#taglist-section).
+  // Both sections are requested simultaneously; each populates its own div independently.
   function openTagDrop(){ hideColPick(); hideMovePick(); hideMoreMenu();
-    const td=$('#tagdrop'); td.innerHTML='<div class="tdrow" style="color:var(--mut)">Loading…</div>'; td.style.display='block'; post({type:'taglist'}); }
+    const td=$('#tagdrop');
+    td.innerHTML='<div id="wd14-section"></div><div id="taglist-section"><div class="tdrow" style="color:var(--mut)">Loading…</div></div>';
+    td.style.display='block'; post({type:'wd14info'}); post({type:'taglist'}); }
   function hideTagDrop(){ $('#tagdrop').style.display='none'; }
   function updateTagBtn(){ $('#tagbtn').classList.toggle('on',tagDropFromDrop); }
   function insertTagChip(token){ const s=search.value.trimEnd(); search.value=(s?s+', ':'')+token+', '; hideAc(); raw=search.value; resetGrid(); requestPage(); search.focus(); }
   function handleTagList(m){
-    const td=$('#tagdrop'); td.innerHTML=''; const tags=m.tags||[];
+    const td=$('#taglist-section'); if(!td)return; td.innerHTML=''; const tags=m.tags||[];
     if(tags.length===0){ const e=document.createElement('div'); e.className='tdempty';
       e.textContent='No tags yet — open an image and add tags in the TAGS inspector tab.'; td.appendChild(e); return; }
     if(sel.size>0){ const h=document.createElement('div'); h.className='tdhead'; h.id='tagdrop-head';
@@ -973,6 +988,36 @@
       if(sel.size>0){ d.onclick=()=>{ d.innerHTML='<span style="color:var(--mut)">Adding…</span>'; d.onclick=null; post({type:'tagbulkadd',token:t.token,ids:[...sel]}); }; }
       else { d.onclick=()=>{ insertTagChip(t.token); hideTagDrop(); tagDropFromDrop=true; updateTagBtn(); }; }
       td.appendChild(d); }); }
+  function handleWd14Info(m){
+    const s=$('#wd14-section'); if(!s)return; s.innerHTML='';
+    const h=document.createElement('div'); h.className='tdhead'; h.textContent='⚗ WD14 TAGGER'; s.appendChild(h);
+    if(m.configured && m.count>0){
+      const r=document.createElement('div'); r.className='tdrow';
+      r.textContent='Tag untagged images ('+m.count.toLocaleString()+')';
+      r.onclick=()=>{ post({type:'wd14run'}); hideTagDrop(); }; s.appendChild(r);
+    } else if(m.configured && m.count===0){
+      const e=document.createElement('div'); e.className='tdempty'; e.textContent='All untagged images have been tagged.'; s.appendChild(e);
+    } else {
+      const r=document.createElement('div'); r.className='tdrow'; r.textContent='Set up WD14 Tagger…';
+      r.onclick=()=>{ post({type:'wd14setup'}); hideTagDrop(); }; s.appendChild(r);
+    }
+    const div=document.createElement('div'); div.style.cssText='border-top:1px solid #2a2236;margin:4px 0'; s.appendChild(div); }
+  function handleWd14Done(m){
+    scanOv.classList.remove('indet');
+    if(m.canceled){
+      scanPhaseEl.textContent=m.notConfigured?'WD14 Tagger not configured — open Settings to set up.':(m.error?'WD14 Tagging failed.':('WD14 canceled — '+(m.tagged||0).toLocaleString()+' images tagged.'));
+      scanFill.style.width='0%'; scanPctEl.textContent='';
+    } else {
+      scanPhaseEl.textContent='WD14 complete — '+(m.tagged||0).toLocaleString()+' images tagged, '+(m.tagsApplied||0).toLocaleString()+' tags applied.';
+      scanFill.style.width='100%'; scanPctEl.textContent='100%'; }
+    setTimeout(hideScan, m.canceled?1500:1100); }
+  function handleWd14SingleDone(m){
+    if(panelMeta && panelMeta.id===m.id){
+      if(m.notConfigured){ const b=$('#wd14-single-btn'); if(b) b.textContent='Not configured — set up WD14 in Settings';
+        setTimeout(()=>{ if(panelMeta) renderTags(panelMeta); },2000); return; }
+      if((m.tags||[]).length>0) panelMeta.userTags=(panelMeta.userTags||[]).concat(m.tags);
+      renderTags(panelMeta);   // re-hydrates chips + restores the button onclick
+    } }
   function handleTagBulkDone(m){ const h=$('#tagdrop-head'); if(!h) return;
     const prev=h.textContent; h.style.color='var(--acid)';
     h.textContent='✓ Added “'+m.token+'” to '+sel.size+' image'+(sel.size===1?'':'s');
@@ -1151,7 +1196,8 @@
       else { acItems=(m.items||[]).slice(0,8); acSel=-1; paintAc(); } }
     else if(m.type==='counts'){ $('#cnt-all').textContent=(m.all||0).toLocaleString(); $('#cnt-unsorted').textContent=(m.unsorted||0).toLocaleString(); $('#cnt-bog').textContent=(m.bog||0).toLocaleString();
       $('#cnt-favorites').textContent=(m.favorites||0)>0?(m.favorites).toLocaleString():'';
-      $('#cnt-optimized').textContent=(m.optimized||0)>0?(m.optimized).toLocaleString():''; }   // shown only when >0
+      $('#cnt-optimized').textContent=(m.optimized||0)>0?(m.optimized).toLocaleString():'';
+      $('#cnt-untagged').textContent=(m.untagged||0)>0?(m.untagged).toLocaleString():''; }   // T51/F39; shown only when >0
     else if(m.type==='tags'){ if(panelMeta&&panelMeta.id===m.id){ panelMeta.promptTags=m.prompt; panelMeta.userTags=m.user; renderTags(panelMeta); } }
     else if(m.type==='cols'){ renderColNav(m.tree||[]); }
     else if(m.type==='folders'){ renderFolNav(m.tree||[]); }
@@ -1169,7 +1215,10 @@
     else if(m.type==='potcount'){ $('#pot-count').textContent=m.count!=null?Number(m.count).toLocaleString():'—'; }
     else if(m.type==='poterror'){ const er=$('#pot-error'); er.textContent=m.message||'Error'; er.style.display='block'; }
     else if(m.type==='taglist'){ handleTagList(m); }
-    else if(m.type==='tagbulkdone'){ handleTagBulkDone(m); } });
+    else if(m.type==='tagbulkdone'){ handleTagBulkDone(m); }
+    else if(m.type==='wd14info'){ handleWd14Info(m); }
+    else if(m.type==='wd14done'){ handleWd14Done(m); }
+    else if(m.type==='wd14singledone'){ handleWd14SingleDone(m); } });
 
   new IntersectionObserver(es=>{ if(es[0].isIntersecting) requestPage(); },{root:scroll,rootMargin:'400px'}).observe($('#sentinel'));
   requestPage(); post({type:'counts'}); post({type:'cols'}); post({type:'folders'}); post({type:'potions'});   // T28/T33 sidebars + F32 Potions

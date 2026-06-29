@@ -27,6 +27,8 @@ public sealed class MainForm : Form
     private int _optGen;                          // T30: generation token for the optimize job (drop stale replies)
     private CancellationTokenSource? _optCts;     // T30: cancels the running optimize job
     private CancellationTokenSource? _scanCts;    // T36/F26: cancels the running scan/import
+    private CancellationTokenSource? _wdCts;      // T51/F39: cancels the bulk WD14 run
+    private bool _wdSingleBusy;                   // T51/F39: prevents a second concurrent per-image run
 
     public MainForm()
     {
@@ -385,6 +387,22 @@ public sealed class MainForm : Form
             }
             if (type == "optimizecancel") { _optCts?.Cancel(); return; }
             if (type == "scancancel") { _scanCts?.Cancel(); return; }   // T36/F26: cancel the running scan
+            // T51/F39 WD14 bridge intercepts — host-side so the tagger can run on a background thread.
+            if (type == "wd14info")
+            {
+                var count = _db.CountNoMetadataUntagged();
+                var configured = !string.IsNullOrEmpty(_settings.WdModelPath) && File.Exists(_settings.WdModelPath);
+                _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "wd14info", configured, count }));
+                return;
+            }
+            if (type == "wd14run") { _ = DoWd14Bulk(); return; }
+            if (type == "wd14cancel") { _wdCts?.Cancel(); return; }
+            if (type == "wd14single")
+            {
+                if (d.RootElement.TryGetProperty("id", out var widEl)) _ = DoWd14Single(widEl.GetInt64());
+                return;
+            }
+            if (type == "wd14setup") { _ = OpenSettings(); return; }
             // T33 / F24 folder rename: physically rename the folder, then repath every indexed row
             // under it in one tx (ids + user-state preserved). Disk move runs first, so a collision/
             // error leaves the DB untouched (no data loss). Silent (pushes {type:'reload'}).
@@ -564,6 +582,8 @@ public sealed class MainForm : Form
         _settings.DefaultMode = dlg.DefaultMode;  // T39
         _settings.MaxDim = dlg.MaxDim;
         _settings.ApiKey = dlg.ApiKey;   // encrypted via DPAPI on assignment
+        _settings.WdModelPath = dlg.WdModelPath;   // T51/F39
+        _settings.WdThreshold = dlg.WdThreshold;
         AppPaths.SetStoreDir(newStore);   // T37: propagate immediately
         SettingsStore.Save(_settings);
 
@@ -691,6 +711,106 @@ public sealed class MainForm : Form
             _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "scandone", canceled = true, read = lastRead, total = lastTotal, error = true }));
         }
         finally { _busy = false; }
+    }
+
+    /// <summary>T51/F39 — Bulk WD14 run: tag every untagged (no prompt metadata + no user tags) image.
+    /// Mirrors DoScan: guarded by _busy, progress overlay via {type:'progress'}, completion via {type:'wd14done'}.
+    /// Uses a separate LibraryDb connection (opDb) so the writer thread does not share the UI connection.</summary>
+    private async Task DoWd14Bulk()
+    {
+        if (_busy) return;
+        var modelPath = _settings.WdModelPath;
+        if (string.IsNullOrEmpty(modelPath) || !File.Exists(modelPath))
+        {
+            _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "status", text = "WD14 Tagger not configured — open Settings to configure." }));
+            return;
+        }
+        _busy = true;
+        SetStatus("WD14 Tagging…");
+        _wdCts?.Dispose();
+        _wdCts = new CancellationTokenSource();
+        var ct = _wdCts.Token;
+        int tagged = 0, tagsApplied = 0;
+        var prog = new Progress<(int cur, int total)>(p =>
+        {
+            _web.CoreWebView2?.PostWebMessageAsString(
+                JsonSerializer.Serialize(new { type = "progress", phase = "WD14 Tagging", current = p.cur, total = p.total }));
+            SetStatus($"WD14 Tagging… {p.cur:n0}/{p.total:n0}");
+        });
+        try
+        {
+            await Task.Run(() =>
+            {
+                var items = _db.GetWd14BatchItems();
+                var iprog = (IProgress<(int, int)>)prog;
+                using var tagger = new Wd14Tagger(modelPath, _settings.WdThreshold);
+                using var opDb = new LibraryDb(AppPaths.LibraryDbFile);
+                for (int i = 0; i < items.Count; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var tags = tagger.TagImage(items[i].AbsPath);
+                    if (tags.Count > 0)
+                    {
+                        opDb.AddUserTagsForImage(items[i].Id, tags);
+                        tagged++;
+                        tagsApplied += tags.Count;
+                    }
+                    iprog.Report((i + 1, items.Count));
+                }
+            });
+            SetStatus($"WD14 complete — {tagged:n0} images tagged, {tagsApplied:n0} tags applied.");
+            _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "wd14done", tagged, tagsApplied, canceled = false }));
+            _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
+            PushPotions();
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus($"WD14 canceled — {tagged:n0} images tagged.");
+            _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");   // T51/Bug-01: refresh count even on cancel
+            _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "wd14done", canceled = true, tagged }));
+        }
+        catch (Exception ex)
+        {
+            SetStatus("WD14 failed: " + ex.Message);
+            _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");   // T51/Bug-01: refresh count even on error
+            _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "wd14done", canceled = true, error = true }));
+        }
+        finally { _busy = false; }
+    }
+
+    /// <summary>T51/F39 — Per-image WD14 tag: runs beside UI (not guarded by _busy); _wdSingleBusy
+    /// prevents a second concurrent per-image run. Uses a fresh LibraryDb connection so the writer
+    /// thread does not share the UI connection. Replies {type:'wd14singledone', id, tags:[...]}.</summary>
+    private async Task DoWd14Single(long id)
+    {
+        if (_wdSingleBusy) return;
+        var modelPath = _settings.WdModelPath;
+        if (string.IsNullOrEmpty(modelPath) || !File.Exists(modelPath))
+        {
+            _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "wd14singledone", id, tags = Array.Empty<string>(), notConfigured = true }));
+            return;
+        }
+        _wdSingleBusy = true;
+        string[] resultTags = [];
+        try
+        {
+            await Task.Run(() =>
+            {
+                var row = _db.GetById(id);
+                if (row == null || !File.Exists(row.AbsPath)) return;
+                using var opDb = new LibraryDb(AppPaths.LibraryDbFile);
+                using var tagger = new Wd14Tagger(modelPath, _settings.WdThreshold);
+                var tags = tagger.TagImage(row.AbsPath);
+                if (tags.Count > 0) opDb.AddUserTagsForImage(id, tags);
+                resultTags = tags.ToArray();
+            });
+            _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "wd14singledone", id, tags = resultTags }));
+        }
+        catch
+        {
+            _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "wd14singledone", id, tags = Array.Empty<string>(), error = true }));
+        }
+        finally { _wdSingleBusy = false; }
     }
 
     /// <summary>T33/F24: rename a physical folder (and re-path every indexed image under it). The disk
