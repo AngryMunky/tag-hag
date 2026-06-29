@@ -42,8 +42,11 @@
   .navrow.v2:hover{background:none}
   .v2pill{font-size:9px;letter-spacing:.5px;padding:1px 5px;border-radius:5px;background:#241b30;color:#8b7ea8;border:1px solid #312842}
   .v2note{padding:6px 12px;font-size:11.5px;color:#544c61;font-style:italic}
-  /* v2.8/T53: cauldron empty-state art — sidebar (Collections/Potions empty) + center (Untagged empty). Scales down in a narrow sidebar (A51). */
-  .cauldron-art{display:block;width:180px;max-width:100%;height:auto;margin:0 auto 10px;opacity:.85}
+  /* v2.8/T53: cauldron empty-state art. v2.8.1: now the CENTER empty-state illustration (not the sidebar). */
+  .cauldron-art{display:block;width:200px;max-width:60%;height:auto;margin:0 auto 6px;opacity:.9}
+  /* v2.8.1: clear-search ✕ inside the search box (shown only when there's text). */
+  #searchclear{display:none;cursor:pointer;color:var(--mut);padding:0 8px;font-size:13px;align-self:center;user-select:none}
+  #searchclear:hover{color:#d8d0bf}
 
   /* ---------------- CENTER ---------------- */
   #center{flex:1;display:flex;flex-direction:column;min-width:0;position:relative;z-index:2}   /* T34: lift center (+ its floating action bar) above the inspector */
@@ -338,13 +341,13 @@
       <span>Collections</span><span class="colnewbtn" id="colnew" title="New top-level collection">＋ New</span>
     </div>
     <nav id="colnav"></nav>
-    <div class="v2note" id="colempty"><img class="cauldron-art" src="cauldron-empty.png" alt="" onerror="this.style.display='none'" />No collections yet — create one with ＋ New, then drag images in.</div>
+    <div class="v2note" id="colempty">No collections yet — create one with ＋ New, then drag images in.</div>
 
     <div class="navhead" style="display:flex;align-items:center;justify-content:space-between">
       <span>Potions</span><span class="colnewbtn" id="potnew" title="New Potion — build a named saved search from scratch">＋ New</span>
     </div>
     <nav id="potnav"></nav>
-    <div class="v2note" id="potempty"><img class="cauldron-art" src="cauldron-empty.png" alt="" onerror="this.style.display='none'" />No Potions brewed yet. Search for tags above, then tap Save as Potion to bottle that search — or use ＋ New to build one from scratch. Your brews live here for instant recall.</div>
+    <div class="v2note" id="potempty">No Potions brewed yet. Search for tags above, then tap Save as Potion to bottle that search — or use ＋ New to build one from scratch. Your brews live here for instant recall.</div>
   </aside>
 
   <!-- ===================== CENTER ===================== -->
@@ -357,6 +360,7 @@
         <div id="searchbox">
           <span class="mag">⌕</span>
           <input id="search" autocomplete="off" spellcheck="false" placeholder="Search the hoard — comma = AND, &quot;quotes&quot; = exact phrase" />
+          <span id="searchclear" title="Clear search">✕</span>
           <button id="pot-save" title="Save this search as a Potion">🧪 Save</button>
         </div>
         <div id="pot-active-strip" title="Potion active — click to edit search freely">
@@ -384,8 +388,7 @@
         </div>
       </div>
       <div id="emptymsg">
-        <div class="hat-halo" id="emptyhat"><div class="hat"><div class="brim"></div><div class="eye"></div></div></div>
-        <img id="emptyart" class="cauldron-art" src="cauldron-empty.png" alt="" onerror="this.style.display='none'" style="display:none" />
+        <img id="emptyart" class="cauldron-art" src="cauldron-empty.png" alt="" onerror="this.style.display='none'" />
         <div id="emptytitle" class="cinzel">The hoard is quiet… for now.</div>
         <div id="emptysub">Add a source folder in Settings, then Scan to fill the cauldron.</div>
         <div id="emptybtn" style="display:none">Clear Filters</div>
@@ -569,7 +572,8 @@
   function deactivatePotionSilent(){ if(!activePotion)return; activePotion=null;
     $('#searchbox').style.display=''; $('#pot-active-strip').style.display='none';
     document.querySelectorAll('#potnav .potrow').forEach(r=>r.classList.remove('on')); }
-  function updatePotSave(){ $('#pot-save').style.display=(!activePotion&&raw.trim().length>0)?'flex':'none'; }
+  function updatePotSave(){ $('#pot-save').style.display=(!activePotion&&raw.trim().length>0)?'flex':'none';
+    $('#searchclear').style.display=search.value.length?'inline':'none'; }   // v2.8.1: clear-✕ visible only with text
   function resetGrid(){ gen++; loading=false; grid.innerHTML=''; loaded=[]; page=0; total=0; exhausted=false; clearSel(); emptyMsg.style.display='none'; panelIdx=-1; showPanelEmpty(); }
   function requestPage(){ if(loading||exhausted)return; loading=true; post({type:'query',raw,page,size:SIZE,gen,...flags()}); }
   function refresh(){ resetGrid(); requestPage(); post({type:'counts'}); }
@@ -614,6 +618,8 @@
       if(e.key==='Tab'){applyAc(acSel<0?0:acSel);e.preventDefault();return;}}
     if(e.key==='Enter'){hideAc();raw=search.value;resetGrid();requestPage();}
     if(e.key==='Escape'){if(acBox.style.display==='block')hideAc();else{search.value='';raw='';updatePotSave();resetGrid();requestPage();}}});
+  // v2.8.1: clear-search ✕ button in the search box.
+  $('#searchclear').onclick=()=>{ if(dupeMode) exitDupes(); search.value=''; raw=''; hideAc(); updatePotSave(); resetGrid(); requestPage(); search.focus(); };
   function applyAc(i){const tok=acItems[i].token;const s=search.value;let q=false,start=0;
     for(let k=0;k<s.length;k++){const c=s[k];if(c==='"')q=!q;else if(c===','&&!q)start=k+1;}
     search.value=s.slice(0,start)+(start>0?' ':'')+tok+', ';hideAc();raw=search.value;resetGrid();requestPage();search.focus();}
@@ -624,12 +630,13 @@
 
   // ---- selection ----
   function clearSel(){ sel.clear(); lastIdx=-1; document.querySelectorAll('.card.sel').forEach(c=>c.classList.remove('sel')); updateBar(); }
-  function updateBar(){ seln.textContent=sel.size+' selected'; actionbar.style.display=sel.size>0?'flex':'none';
+  function updateBar(){
+    post({type:'selchange',count:sel.size,single:sel.size===1});   // v2.8.1: notify the WinForms File menu FIRST, before any DOM work that could throw (prevents a stuck "1 selected")
+    seln.textContent=sel.size+' selected'; actionbar.style.display=sel.size>0?'flex':'none';
     $('#pill-rename').classList.toggle('off',sel.size!==1);                 // Rename is single-selection (T34)
     $('#pill-addcol').style.display=colsCache.length>0?'flex':'none';       // hide Add-to-Collection until a collection exists
     if(!sel.size){ hideColPick(); hideMovePick(); hideMoreMenu(); }
-    relayoutBar();
-    post({type:'selchange',count:sel.size,single:sel.size===1}); }   // v2.8/T53: drive the WinForms File-menu enable/grey state (single → Rename only)
+    relayoutBar(); }
   function paintCard(idx){ const card=grid.querySelector('.card[data-idx="'+idx+'"]'); if(card) card.classList.toggle('sel',sel.has(loaded[idx].id)); }
   function selectClick(idx,e){ const id=loaded[idx].id;
     if(e.shiftKey&&lastIdx>=0){ const [a,b]=[Math.min(lastIdx,idx),Math.max(lastIdx,idx)]; for(let i=a;i<=b;i++){sel.add(loaded[i].id);paintCard(i);} }
@@ -644,6 +651,12 @@
   document.querySelectorAll('#actionbar .pill[data-op]').forEach(b=>b.onclick=()=>doOp(b.dataset.op));
   $('#selclear').onclick=clearSel;
   function doOp(op){ if(!sel.size)return; post({type:'op',op,ids:[...sel]}); }
+  // v2.8.1: favorite as a TRUE bulk toggle — if EVERY selected image is already favorited, turn OFF; else ON.
+  // (Was hardcoded on:true, so "Toggle Favorite ★" / the ★ pill could only add, never remove — the "favorite
+  // locked in place" report.) Matches the per-card star, which already toggles.
+  function favSel(){ if(!sel.size) return; const ids=[...sel];
+    const allFav=ids.every(id=>{ const it=loaded.find(x=>x.id===id); return it&&it.favorite; });
+    post({type:'favbulk',ids,on:!allFav}); }
 
   // v2.8/T53: WinForms File menu → gallery op path. C# posts {type:'menuop',op}; we run the SAME
   // handlers the bottom action bar uses, so C# never needs the id list (N1 token reconciliation):
@@ -653,14 +666,14 @@
     if(!sel.size) return;                                  // File items are greyed at count 0; guard anyway
     if(op==='move') openMovePicker();
     else if(op==='rename') promptRename();
-    else if(op==='favorite') post({type:'favbulk',ids:[...sel],on:true});
+    else if(op==='favorite') favSel();
     else if(op==='copy'||op==='delete') doOp(op);
   }
 
   // ---- T34/F23 file-manager verbs (action bar) ----
   $('#pill-moveto').onclick=(e)=>{ e.stopPropagation(); openMovePicker(); };
   $('#pill-rename').onclick=(e)=>{ e.stopPropagation(); promptRename(); };
-  $('#pill-fav').onclick=()=>{ if(sel.size) post({type:'favbulk',ids:[...sel],on:true}); };
+  $('#pill-fav').onclick=()=>favSel();
   $('#pill-more').onclick=(e)=>{ e.stopPropagation(); openMoreMenu(); };
 
   function promptRename(){ if(sel.size!==1) return; const id=[...sel][0];
@@ -670,7 +683,7 @@
   // Secondary verbs, shared by the inline group (wide) and the ⋯ More popup (narrow).
   function moreActions(){ const a=[
       {label:'✎ Rename', on:sel.size===1, run:promptRename},
-      {label:'★ Favorite', on:sel.size>0, run:()=>{ if(sel.size) post({type:'favbulk',ids:[...sel],on:true}); }} ];
+      {label:'★ Favorite', on:sel.size>0, run:favSel} ];
     if(colsCache.length) a.push({label:'＋ Add to Collection…', on:true, run:openColPicker});
     a.push({label:'⧉ Copy', on:true, run:()=>doOp('copy')});
     return a; }
@@ -1130,11 +1143,7 @@
       btn.style.display='block'; btn.textContent='Clear Search'; btn.onclick=()=>{ search.value=''; raw=''; refresh(); }; }
     else if(scope==='untagged'){ $('#emptytitle').textContent='Nothing left untagged.'; $('#emptysub').textContent='Every image here already carries a tag or generation metadata. Open an image and use ⚗ Auto-Tagger to tag more.'; btn.style.display='none'; }
     else { $('#emptytitle').textContent='The hoard is quiet… for now.'; $('#emptysub').textContent='Add a source folder in Settings, then Scan to fill the cauldron.'; btn.style.display='none'; }
-    // v2.8/T53: cauldron art for the empty Untagged scope; witch-hat art everywhere else.
-    const useCauldron = !q && scope==='untagged';
-    $('#emptyhat').style.display = useCauldron ? 'none' : '';
-    $('#emptyart').style.display = useCauldron ? 'block' : 'none';
-    emptyMsg.style.display='flex'; }
+    emptyMsg.style.display='flex'; }   // v2.8.1: the cauldron (#emptyart) is the static center illustration for every empty state
 
   window.chrome && window.chrome.webview && window.chrome.webview.addEventListener('message',ev=>{
     let m; try{m=JSON.parse(ev.data);}catch{return;}
@@ -1161,7 +1170,7 @@
       loading=false; dupeMode=true; total=m.total; addCards(m.items||[]);
       $('#cnt-dupes').textContent = m.groups>0 ? m.groups.toLocaleString() : '0';
       countEl.textContent = m.groups>0 ? (m.groups.toLocaleString()+' duplicate set'+(m.groups===1?'':'s')+' · '+m.total.toLocaleString()+' image'+(m.total===1?'':'s')) : 'No duplicates found';
-      if(m.total===0){ $('#emptytitle').textContent='No duplicates found.'; $('#emptysub').textContent=nearDupes?'No matching or near-matching images in the hoard.':'No exact matches — try “Include near-dups”.'; $('#emptybtn').style.display='none'; $('#emptyhat').style.display=''; $('#emptyart').style.display='none'; emptyMsg.style.display='flex'; }
+      if(m.total===0){ $('#emptytitle').textContent='No duplicates found.'; $('#emptysub').textContent=nearDupes?'No matching or near-matching images in the hoard.':'No exact matches — try “Include near-dups”.'; $('#emptybtn').style.display='none'; emptyMsg.style.display='flex'; }
       else emptyMsg.style.display='none'; }
     else if(m.type==='inspect'){ if(m.target==='lightbox') showLb(m); else showPanel(m); }
     else if(m.type==='reload'){ raw=search.value; if(dupeMode) runDupes(); else refresh(); post({type:'folders'}); }
