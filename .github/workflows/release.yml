@@ -64,15 +64,46 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tag   = '${{ steps.ver.outputs.tag }}'
-          $asset = 'publish/TheTagHag.exe'
+          $tag     = '${{ steps.ver.outputs.tag }}'
+          $version = '${{ steps.ver.outputs.version }}'
+          $asset   = 'publish/TheTagHag.exe'
+
+          # Release notes come from the matching CHANGELOG.md section. Fall back to
+          # GitHub's auto-generated notes when this version has no entry (e.g. old tags).
+          $notesArgs = @('--generate-notes')
+          if (Test-Path 'CHANGELOG.md') {
+            $lines = Get-Content 'CHANGELOG.md' -Encoding utf8
+            $start = -1
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+              if ($lines[$i] -match ('^##\s+\[' + [regex]::Escape($version) + '\]')) { $start = $i; break }
+            }
+            if ($start -ge 0) {
+              $body = @()
+              for ($j = $start + 1; $j -lt $lines.Count; $j++) {
+                if ($lines[$j] -match '^##\s+\[') { break }
+                $body += $lines[$j]
+              }
+              $text = ($body -join "`n").Trim()
+              if ($text) {
+                $footer = "`n`n**Full changelog:** https://github.com/AngryMunky/tag-hag/blob/main/CHANGELOG.md"
+                Set-Content -Path 'notes.md' -Value ($text + $footer) -Encoding utf8
+                $notesArgs = @('--notes-file', 'notes.md')
+                Write-Host "Using CHANGELOG.md notes for $tag."
+              }
+            }
+          }
+          if ($notesArgs[0] -eq '--generate-notes') {
+            Write-Host "No CHANGELOG entry for $version - using auto-generated notes."
+          }
+
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
-            Write-Host "Release $tag already exists - uploading asset (clobber)."
+            Write-Host "Release $tag exists - clobbering asset + refreshing notes."
             gh release upload $tag $asset --clobber
+            if ($notesArgs[0] -eq '--notes-file') { gh release edit $tag --notes-file notes.md }
           } else {
             Write-Host "Creating release $tag."
-            gh release create $tag $asset --title "The Tag Hag $tag" --generate-notes
+            gh release create $tag $asset --title "The Tag Hag $tag" @notesArgs
           }
 
       - name: Upload the build artifact (always downloadable from the run)
