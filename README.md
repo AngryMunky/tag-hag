@@ -13,6 +13,14 @@ A portable, single-file **Windows desktop app** for managing a large local libra
 
 Grab **`TheTagHag.exe`** from the [**Releases**](https://github.com/AngryMunky/tag-hag/releases/latest) page — one self-contained file. No installer, no .NET required; just run it.
 
+## How it's organised
+
+Tag Hag keeps three distinct layers so you always know where an image actually lives:
+
+- **Folders** — the physical files on disk, mirrored as a browsable tree.
+- **Collections** — your curated hierarchy, and the organising spine. Each image has **one definitive home** here, and Optimize can write that hierarchy back to disk.
+- **Potions** 🧪 — saved searches: dynamic, overlapping views that never move a file.
+
 ## Features
 
 - **Scan** multiple source folders recursively, with a live **0–100% cancelable progress** overlay; incremental re-scans skip unchanged files and prune deleted ones.
@@ -21,15 +29,16 @@ Grab **`TheTagHag.exe`** from the [**Releases**](https://github.com/AngryMunky/t
 - **Gallery** with virtualized infinite scroll and a lazy 512px WebP **thumbnail cache** for fast load at scale.
 - **Inspector panel** + lightbox showing positive / negative prompt, checkpoint, LoRAs, sampler / steps / CFG / seed, with copy buttons.
 - **Personal knowledge management** — **Favorites**, per-image **Notes**, and **manual tags** that blend into the same search as the prompt tags. None of it is wiped by a re-scan.
-- **Collections**: group images into named, **nested** logical sets. Build a hierarchy in the sidebar, then **Consolidate by collection tree** to write that hierarchy to disk — one definitive home per image; uncollected images land in `_Uncollected`.
-- **Potions** 🧪: save any search as a named "Potion" — a reusable filter you can recall from the sidebar instantly. Auto-seeded from your most-used tags on first run; full CRUD with undo.
+- **Collections** — group images into named, **nested** logical sets. The **first scan of a source folder auto-seeds a matching collection tree** and files your images into it; later re-scans add new images without disturbing your edits. Open a nested collection and a **breadcrumb** (`📂 › Animals › Cats`) appears, with an **Include sub-collections** toggle to view just the direct children or the whole subtree. **Consolidate by collection tree** then writes the hierarchy to disk — one definitive home per image; anything uncollected lands in `_Uncollected`.
+- **Potions** 🧪 — save any search as a named, reusable filter you can recall from the sidebar instantly. **Auto-seed Potions** (Folders menu) brews one for each of your **25 most-used tags**; **Reset Auto-Potions** clears only those, leaving the ones you made by hand. Full CRUD with undo.
+- **Find similar by tags**: pick an image and surface the others that share its prompt tags, ranked by a **tunable similarity slider** (default 70%) — drag it to tighten or loosen the match.
 - **Auto-Tag** (suggest-only): proposes tags for an image from its visually-similar neighbours; you approve each one.
 - **Find Duplicates** by perceptual hash — exact and near-match.
 - **Folders**: your imported subfolders show up as a browsable sidebar tree — rename or move a folder in-app and the library follows on disk.
-- **File-manager action bar**: multi-select (incl. **Ctrl+A to select the entire current view**, not just the loaded page), then **Move / Rename / Delete**, bulk **Favorite**, or **Add to Collection** — or **drag images straight onto a folder** in the sidebar to move them there on disk. In-library moves keep every image's favorites / notes / tags / collections attached.
+- **File-manager action bar**: multi-select (incl. **Ctrl+A to select the entire current view**, not just the loaded page), then **Move / Rename / Delete**, bulk **Favorite**, or **Add to Collection** — or **drag images straight onto a folder or collection** in the sidebar to file them there. In-library moves keep every image's favorites / notes / tags / collections attached.
 - **State-preserving re-link**: reorganise or rename files in Explorer and Tag Hag re-attaches all that user state on the next scan, matching moved files by perceptual hash.
-- **Library Optimization**: resample large images into a Tag-Hag-managed store that mirrors your source tree, then recycle the originals to reclaim disk — for one image, a selection, or the **whole library**. Format-preserving (no transcode), metadata-preserving, idempotent, with a preview tally before it runs.
-- **Export & cull**: bulk **Copy** into a confined export tree, **Archive** to the Bog, or **Delete** (Recycle Bin — recoverable).
+- **Library Optimization**: resample large images into a Tag-Hag-managed store laid out to mirror your **collection tree** (the default) — or your source folders, if you prefer — then recycle the originals to reclaim disk. Runs for one image, a selection, or the **whole library**. Format-preserving (no transcode), metadata-preserving, idempotent, with a preview tally before it runs.
+- **Export & cull**: bulk **Copy** a selection into a confined export tree, or **Delete** to the Recycle Bin (recoverable, with a warning).
 - **Civitai mode**: browse the live feed (period / sort / NSFW / min-likes / *Followed only*), react inline, and pick images to import into the library.
 - **Dark Magic Pro** look: a 3-pane shell with a witch-hat brand, Cinzel + Inter type, and the hag-tag app icon.
 
@@ -56,9 +65,10 @@ The engine has a headless self-test harness (the GUI is verified in-app). Each p
 ```sh
 TheTagHag.exe --selftest          # SQLite + FTS5 smoke test
 TheTagHag.exe --selftest-scan tests\fixtures
-# feature suites: -db -dupes -v4migrate -v5migrate -optimizelib -optindicator -relink
-#                 -folders -filemanager -favorites -notes -usertags -collections -autotag
-#                 -selectall -scanprogress -collnest -collconsolidate -potions
+# feature suites: -db -dupes -relink -folders -filemanager -favorites -notes -usertags
+#                 -collections -collnest -collconsolidate -potions -autotag
+#                 -selectall -scanprogress -optimizelib -optindicator
+#                 -v4migrate -v5migrate -v6migrate
 ```
 
 Regenerate the app icon from the brand mark:
