@@ -745,26 +745,13 @@
   // ---- T43/F30 drag images into a Collections-sidebar row (logical add via coladd, INSERT OR IGNORE — no file move) ----
   const colnavEl=$('#colnav');
   function clearColDropHi(){ colnavEl.querySelectorAll('.colrow.drop').forEach(r=>r.classList.remove('drop')); }
-  colnavEl.addEventListener('dragover',e=>{
-    if(!dragIds.length) return;
-    const row=e.target.closest('.colrow');
-    if(!row){ clearColDropHi(); setDragScroll(0); return; }
-    e.preventDefault(); try{ e.dataTransfer.dropEffect='copy'; }catch(_){}
-    if(!row.classList.contains('drop')){ clearColDropHi(); row.classList.add('drop'); }
-    if(sidebarEl){ const r=sidebarEl.getBoundingClientRect(), EDGE=46;
-      setDragScroll(e.clientY<r.top+EDGE?-1:(e.clientY>r.bottom-EDGE?1:0)); }
-  });
+  // v2.8.4 BUGFIX: drop is wired PER-ROW in renderColNav (robust). The old container `e.target.closest('.colrow')`
+  // delegation could miss when the drag target was a child span/text node → the drop never fired. The container
+  // listener now ONLY handles edge auto-scroll; highlight + drop live on each row.
+  colnavEl.addEventListener('dragover',e=>{ if(!dragIds.length||!sidebarEl) return;
+    const r=sidebarEl.getBoundingClientRect(), EDGE=46;
+    setDragScroll(e.clientY<r.top+EDGE?-1:(e.clientY>r.bottom-EDGE?1:0)); });
   colnavEl.addEventListener('dragleave',e=>{ if(!e.relatedTarget||!colnavEl.contains(e.relatedTarget)){ clearColDropHi(); setDragScroll(0); } });
-  colnavEl.addEventListener('drop',e=>{
-    if(!dragIds.length) return;
-    const row=e.target.closest('.colrow'); clearColDropHi(); setDragScroll(0);
-    if(!row) return;
-    e.preventDefault();
-    const ids=dragIds.slice(); dragIds=[];
-    const cname=(colsCache.find(c=>c.id===Number(row.dataset.cid)))||{name:'collection'};
-    countEl.textContent='Added '+ids.length+' → '+cname.name;
-    post({type:'coladd',collectionId:Number(row.dataset.cid),ids});   // same contract as openColPicker (:850)
-  });
 
   // ---- right-click menu ----
   const ctx=$('#ctx'); let ctxIdx=-1;
@@ -947,6 +934,12 @@
         document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.toggle('on',r===row));
         document.querySelectorAll('#folnav .navrow').forEach(r=>r.classList.remove('on'));
         $('#viewtitle').textContent=n.name; refresh(); };
+      // v2.8.4: per-row drop target for drag-to-collection (robust — no delegation/closest; works on child/text targets).
+      row.addEventListener('dragover',e=>{ if(!dragIds.length) return; e.preventDefault(); try{ e.dataTransfer.dropEffect='copy'; }catch(_){}
+        if(!row.classList.contains('drop')){ clearColDropHi(); row.classList.add('drop'); } });
+      row.addEventListener('dragleave',e=>{ if(!row.contains(e.relatedTarget)) row.classList.remove('drop'); });
+      row.addEventListener('drop',e=>{ if(!dragIds.length) return; e.preventDefault(); clearColDropHi(); setDragScroll(0);
+        const ids=dragIds.slice(); dragIds=[]; countEl.textContent='Added '+ids.length+' → '+n.name; post({type:'coladd',collectionId:n.id,ids}); });
       nav.appendChild(row);
       if(n.children&&n.children.length) walk(n.children,depth+1);
     }); };
@@ -1128,6 +1121,12 @@
     setTimeout(hideScan, m.canceled?1500:1100); }
   $('#scancancelbtn').onclick=()=>{ post({type:'scancancel'}); scanOv.classList.add('indet'); scanPhaseEl.textContent='Cancelling…'; scanPctEl.textContent=''; };
   window.addEventListener('resize',()=>{ if(scanOv.style.display==='flex') placeScanOv(); });
+  // v2.8.4: Optimize reuses this overlay — C# posts {type:'progress'} per item (shows/updates it via the handler below) and {type:'optdone'} at the end. The Cancel button posts 'scancancel', which C# routes to both _scanCts and _optCts.
+  function optDone(m){ scanOv.classList.remove('indet');
+    if(m.error){ scanPhaseEl.textContent='Optimize failed — see the status bar.'; scanPctEl.textContent=''; }
+    else if(m.canceled){ scanPhaseEl.textContent='Optimize canceled.'; scanPctEl.textContent=''; }
+    else { scanPhaseEl.textContent='Done — '+(m.optimized||0).toLocaleString()+' optimized'+(m.skipped?' · '+m.skipped.toLocaleString()+' skipped':'')+(m.failed?' · '+m.failed.toLocaleString()+' failed':''); scanFill.style.width='100%'; scanPctEl.textContent='100%'; }
+    setTimeout(hideScan, (m.canceled||m.error)?1500:1400); }
 
   // ---- keyboard ----
   document.addEventListener('keydown',e=>{
@@ -1157,6 +1156,7 @@
       sel=new Set(m.ids||[]); loaded.forEach((it,i)=>paintCard(i)); updateBar(); }   // T40/F28 — select-all-the-view; true count in the bar
     else if(m.type==='progress'){ updateScan(m.phase||'Working', m.current||0, m.total||0); }   // T36/F26 import/scan overlay
     else if(m.type==='scandone'){ scanDone(m); }                                                  // T36/F26 completion summary
+    else if(m.type==='optdone'){ optDone(m); }                                                    // v2.8.4: optimize completion → hide the overlay
     else if(m.type==='ac'){ if(m.acTarget==='tags'){ tagAcItems=(m.items||[]).slice(0,8); tagAcSel=-1; paintTagAc(); }
       else { acItems=(m.items||[]).slice(0,8); acSel=-1; paintAc(); } }
     else if(m.type==='counts'){ $('#cnt-all').textContent=(m.all||0).toLocaleString();

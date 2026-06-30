@@ -455,7 +455,7 @@ public sealed class MainForm : Form
                 return;
             }
             if (type == "optimizecancel") { _optCts?.Cancel(); return; }
-            if (type == "scancancel") { _scanCts?.Cancel(); return; }   // T36/F26: cancel the running scan
+            if (type == "scancancel") { _scanCts?.Cancel(); _optCts?.Cancel(); return; }   // T36/F26: cancel the scan; v2.8.4: the shared overlay Cancel also cancels a running optimize
             // T51/F39 WD14 bridge intercepts — host-side so the tagger can run on a background thread.
             if (type == "wd14info")
             {
@@ -1267,7 +1267,12 @@ public sealed class MainForm : Form
         bool isConsolidate = organizeBy == OrganizeBy.Collections || mode == OptimizeMode.MoveOnly;
         var verb = isConsolidate ? "Consolidating" : "Optimizing";
         SetStatus($"{verb} library…");
-        var prog = new Progress<HarvestProgress>(p => SetStatus($"{p.Phase}… {p.Current:n0}/{p.Total:n0}"));
+        var prog = new Progress<HarvestProgress>(p =>
+        {
+            SetStatus($"{p.Phase}… {p.Current:n0}/{p.Total:n0}");
+            // v2.8.4: also drive the gallery progress overlay (#scanoverlay), the same path scan uses.
+            _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "progress", phase = p.Phase, current = p.Current, total = p.Total }));
+        });
         try
         {
             var res = await Task.Run(() =>
@@ -1289,9 +1294,11 @@ public sealed class MainForm : Form
         catch (OperationCanceledException)
         {
             SetStatus(isConsolidate ? "Consolidation cancelled." : "Optimize cancelled.");
+            _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"optdone\",\"canceled\":true}");   // v2.8.4: hide the overlay
             _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
         }
-        catch (Exception ex) { SetStatus($"{verb} failed: " + ex.Message); }
+        catch (Exception ex) { SetStatus($"{verb} failed: " + ex.Message);
+            _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"optdone\",\"error\":true}"); }   // v2.8.4: hide the overlay
         finally { _busy = false; }
     }
 
