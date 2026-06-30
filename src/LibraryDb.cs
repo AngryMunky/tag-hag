@@ -31,7 +31,7 @@ public sealed class LibraryDb : IDisposable
     /// v5 (additive, v2.3) adds collections.parent_id (nullable FK back to collections.id) enabling
     /// nested collections (F29). NO ON DELETE CASCADE — deleting a parent PROMOTES its children
     /// (re-parents them one level up) in code (R28). ix_collections_parent is built in Migrate().</summary>
-    public const int SchemaVersion = 5;
+    public const int SchemaVersion = 6;
 
     private readonly SqliteConnection _con;
 
@@ -150,10 +150,13 @@ END;
 -- Named collections (many-to-many groups). Case-insensitive unique names.
 -- parent_id (v5/T41) enables nesting: NULL = root. NO ON DELETE CASCADE — deleting a
 -- parent PROMOTES its children in code (R28). index ix_collections_parent is built in Migrate().
+-- folder_key (v6/T54): absolute path of the source subfolder that seeded this collection (F51).
+-- NULL = user-created. ix_collections_folder_key is built in Migrate().
 CREATE TABLE IF NOT EXISTS collections (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
   parent_id INTEGER REFERENCES collections(id),
+  folder_key TEXT,
   UNIQUE(name COLLATE NOCASE)
 );
 
@@ -168,13 +171,14 @@ CREATE INDEX IF NOT EXISTS ix_collection_items_image ON collection_items(image_i
 
 -- ===== v2.4 (additive) — Potions (saved searches / F32) =====
 -- New table: CREATE IF NOT EXISTS handles both fresh DBs and upgrades from v5.
--- No ALTER needed on existing tables; Migrate() is NOT changed; SchemaVersion stays 5.
+-- v6 (T54) adds is_auto_seeded via ALTER in Migrate() for existing DBs; fresh DBs have it inline.
 CREATE TABLE IF NOT EXISTS potions (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  name       TEXT    NOT NULL COLLATE NOCASE,
-  query      TEXT    NOT NULL,
-  created_at TEXT    NOT NULL,
-  sort_order INTEGER NOT NULL DEFAULT 0,
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  name           TEXT    NOT NULL COLLATE NOCASE,
+  query          TEXT    NOT NULL,
+  created_at     TEXT    NOT NULL,
+  sort_order     INTEGER NOT NULL DEFAULT 0,
+  is_auto_seeded INTEGER NOT NULL DEFAULT 0,
   UNIQUE(name COLLATE NOCASE)
 );
 CREATE INDEX IF NOT EXISTS ix_potions_sort ON potions(sort_order, id);");
@@ -213,6 +217,13 @@ CREATE INDEX IF NOT EXISTS ix_potions_sort ON potions(sort_order, id);");
             // SQLite — instant on any size DB. No ON DELETE CASCADE (R28 — children are promoted in code).
             if (current < 5 && !ColumnExists("collections", "parent_id"))
                 Exec("ALTER TABLE collections ADD COLUMN parent_id INTEGER REFERENCES collections(id);");
+            // v5 → v6: add folder_key to collections (F51 source-folder auto-import) and
+            // is_auto_seeded to potions (F53 Auto-Potion guard + reset). Both are metadata-only
+            // ALTER TABLEs — instant on any size DB; existing rows read back as NULL / 0.
+            if (current < 6 && !ColumnExists("collections", "folder_key"))
+                Exec("ALTER TABLE collections ADD COLUMN folder_key TEXT;");
+            if (current < 6 && !ColumnExists("potions", "is_auto_seeded"))
+                Exec("ALTER TABLE potions ADD COLUMN is_auto_seeded INTEGER NOT NULL DEFAULT 0;");
         }
 
         // Indexes over columns that arrive via ALTER live HERE, not in EnsureSchema: on an older DB
@@ -221,6 +232,7 @@ CREATE INDEX IF NOT EXISTS ix_potions_sort ON potions(sort_order, id);");
         Exec("CREATE INDEX IF NOT EXISTS ix_images_favorite ON images(favorite);");
         Exec("CREATE INDEX IF NOT EXISTS ix_images_optimized ON images(optimized);");
         Exec("CREATE INDEX IF NOT EXISTS ix_collections_parent ON collections(parent_id);");
+        Exec("CREATE INDEX IF NOT EXISTS ix_collections_folder_key ON collections(folder_key);");
 
         // v2.8 / F40 "Retire The Bog": un-archive all rows ONCE (meta-guarded data migration, NOT a
         // schema change — A37). The `archived` column stays; the app simply stops writing/filtering on
@@ -1511,6 +1523,184 @@ CREATE INDEX IF NOT EXISTS ix_potions_sort ON potions(sort_order, id);");
     }
     public long FtsMatchCount(string query) =>
         Convert.ToInt64(Scalar("SELECT COUNT(*) FROM images_fts WHERE images_fts MATCH $q;", ("$q", query)) ?? 0L);
+
+    // ===== v2.9 — Source-folder seeding + Auto-Potion guard + Find Similar (F51/F53/F54) =====
+
+    /// <summary>True if ≥1 collection has a folder_key rooted at this source path (import-once guard).</summary>
+    public bool IsFolderSeeded(string sourceRoot)
+    {
+        var prefix = sourceRoot.TrimEnd('\\', '/') + "\\";
+        return Convert.ToInt64(Scalar(
+            "SELECT COUNT(*) FROM collections WHERE folder_key IS NOT NULL AND folder_key LIKE $p;",
+            ("$p", prefix + "%"))) > 0;
+    }
+
+    /// <summary>Create/adopt the collection hierarchy mirroring the subfolder tree under
+    /// <paramref name="sourceRoot"/>, then assign each image to its immediate-parent-folder collection.
+    /// Capped at 25 nodes per root (R52). Returns the count of collection nodes processed.</summary>
+    public int SeedCollectionsFromSourceRoot(string sourceRoot)
+    {
+        var dirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.CommandText = "SELECT rel_path FROM images WHERE source_root=$root AND archived=0;";
+            cmd.Parameters.AddWithValue("$root", sourceRoot);
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read())
+            {
+                var rel = rd.GetString(0);
+                var slash = rel.LastIndexOf('\\');
+                if (slash > 0) dirs.Add(rel.Substring(0, slash));
+            }
+        }
+        if (dirs.Count == 0) return 0;
+
+        // Process shallowest dirs first (parents before children), cap at 25 (R52).
+        var sorted = dirs
+            .OrderBy(d => d.Count(c => c == '\\'))
+            .ThenBy(d => d, StringComparer.OrdinalIgnoreCase)
+            .Take(25)
+            .ToList();
+
+        var folderToId = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        int count = 0;
+
+        using var tx = _con.BeginTransaction();
+        foreach (var relDir in sorted)
+        {
+            var segs = relDir.Split('\\');
+            var absFolder = Path.Combine(sourceRoot, relDir);
+            var name = segs[segs.Length - 1];
+            long? parentId = null;
+            if (segs.Length > 1)
+            {
+                var parentRel = string.Join("\\", segs, 0, segs.Length - 1);
+                if (folderToId.TryGetValue(parentRel, out var pid) && pid > 0) parentId = pid;
+            }
+            var id = FindOrCreateCollectionByFolder(absFolder, name, parentId);
+            if (id > 0) { folderToId[relDir] = id; count++; }
+        }
+        tx.Commit();
+
+        AssignNewImagesToFolderCollections(sourceRoot);
+        return count;
+    }
+
+    /// <summary>For each non-archived image under <paramref name="sourceRoot"/>, insert it into the
+    /// collection whose folder_key matches its immediate parent folder. Idempotent (INSERT OR IGNORE).</summary>
+    public void AssignNewImagesToFolderCollections(string sourceRoot)
+    {
+        var images = new List<(long Id, string AbsDir)>();
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.CommandText = "SELECT id, rel_path FROM images WHERE source_root=$root AND archived=0;";
+            cmd.Parameters.AddWithValue("$root", sourceRoot);
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read())
+            {
+                var rel = rd.GetString(1);
+                var slash = rel.LastIndexOf('\\');
+                if (slash > 0)
+                    images.Add((rd.GetInt64(0), Path.Combine(sourceRoot, rel.Substring(0, slash))));
+            }
+        }
+        if (images.Count == 0) return;
+
+        var folderMap = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.CommandText = "SELECT folder_key, id FROM collections WHERE folder_key IS NOT NULL AND folder_key LIKE $p;";
+            cmd.Parameters.AddWithValue("$p", sourceRoot.TrimEnd('\\', '/') + "\\%");
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read()) folderMap[rd.GetString(0)] = rd.GetInt64(1);
+        }
+        if (folderMap.Count == 0) return;
+
+        using var tx = _con.BeginTransaction();
+        using (var cmd = _con.CreateCommand())
+        {
+            cmd.CommandText = "INSERT OR IGNORE INTO collection_items(collection_id, image_id) VALUES($c,$i);";
+            var pC = cmd.Parameters.Add("$c", SqliteType.Integer);
+            var pI = cmd.Parameters.Add("$i", SqliteType.Integer);
+            foreach (var (imgId, absDir) in images)
+            {
+                if (folderMap.TryGetValue(absDir, out var collId))
+                {
+                    pC.Value = collId; pI.Value = imgId;
+                    cmd.ExecuteNonQuery();
+                }
+            }
+        }
+        tx.Commit();
+    }
+
+    private long FindOrCreateCollectionByFolder(string folderPath, string name, long? parentId)
+    {
+        // 1. Already seeded with this exact folder_key
+        var byKey = Scalar("SELECT id FROM collections WHERE folder_key=$fk;", ("$fk", folderPath));
+        if (byKey is not null && byKey is not DBNull) return Convert.ToInt64(byKey);
+
+        // 2. Adopt a name-matching collection with no folder_key yet (R-D: name-collision-adopt)
+        Exec("UPDATE collections SET folder_key=$fk WHERE name=$n COLLATE NOCASE AND folder_key IS NULL;",
+            ("$fk", folderPath), ("$n", name));
+
+        // 3. Insert if no row with this name exists yet
+        if (parentId.HasValue)
+            Exec("INSERT OR IGNORE INTO collections(name,parent_id,folder_key) VALUES($n,$p,$fk);",
+                ("$n", name), ("$p", parentId.Value), ("$fk", folderPath));
+        else
+            Exec("INSERT OR IGNORE INTO collections(name,folder_key) VALUES($n,$fk);",
+                ("$n", name), ("$fk", folderPath));
+
+        var id = Scalar("SELECT id FROM collections WHERE name=$n COLLATE NOCASE;", ("$n", name));
+        return id is not null && id is not DBNull ? Convert.ToInt64(id) : -1;
+    }
+
+    /// <summary>Create an auto-seed Potion (is_auto_seeded=1). INSERT OR IGNORE — idempotent on name.</summary>
+    public long CreateAutoSeedPotion(string name, string query)
+    {
+        Exec("INSERT OR IGNORE INTO potions(name,query,created_at,is_auto_seeded) VALUES($n,$q,$t,1);",
+            ("$n", name), ("$q", query), ("$t", DateTime.UtcNow.ToString("o")));
+        var id = Scalar("SELECT id FROM potions WHERE name=$n COLLATE NOCASE;", ("$n", name));
+        return id is not null && id is not DBNull ? Convert.ToInt64(id) : -1;
+    }
+
+    /// <summary>Delete all auto-seeded Potions (reset flow, F53). Returns count deleted.</summary>
+    public int DeleteAutoSeedPotions() =>
+        Exec("DELETE FROM potions WHERE is_auto_seeded=1;");
+
+    /// <summary>True if ≥1 auto-seeded Potion exists (startup guard for F53, replaces IsPotionSeeded).</summary>
+    public bool HasAutoSeedPotions() =>
+        Convert.ToInt64(Scalar("SELECT COUNT(*) FROM potions WHERE is_auto_seeded=1;") ?? 0L) > 0;
+
+    /// <summary>SQL Jaccard similarity: images sharing ≥ <paramref name="threshold"/> tag overlap with
+    /// <paramref name="imageId"/>, ordered DESC, capped at <paramref name="limit"/>. Uses
+    /// ix_image_tags_token to prune via an IN-list before grouping (F54/R53).</summary>
+    public IReadOnlyList<(long Id, double Jaccard)> FindSimilarByTags(long imageId, double threshold = 0.3, int limit = 50)
+    {
+        var result = new List<(long, double)>();
+        using var cmd = _con.CreateCommand();
+        cmd.CommandText = @"
+SELECT
+  b.image_id AS id,
+  CAST(COUNT(*) AS REAL) /
+    ((SELECT COUNT(*) FROM image_tags WHERE image_id = $src) +
+     (SELECT COUNT(*) FROM image_tags WHERE image_id = b.image_id) -
+     COUNT(*)) AS jaccard
+FROM image_tags b
+WHERE b.token IN (SELECT token FROM image_tags WHERE image_id = $src)
+  AND b.image_id <> $src
+GROUP BY b.image_id
+HAVING jaccard >= $threshold
+ORDER BY jaccard DESC
+LIMIT $limit;";
+        cmd.Parameters.AddWithValue("$src", imageId);
+        cmd.Parameters.AddWithValue("$threshold", threshold);
+        cmd.Parameters.AddWithValue("$limit", limit);
+        using var rd = cmd.ExecuteReader();
+        while (rd.Read()) result.Add((rd.GetInt64(0), rd.GetDouble(1)));
+        return result;
+    }
 
     private int? GetMetaInt(string k)
     {

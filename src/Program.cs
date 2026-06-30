@@ -94,6 +94,8 @@ internal static class Program
             return CollConsolidateSelfTest();
         if (args.Any(a => string.Equals(a, "--selftest-potions", StringComparison.OrdinalIgnoreCase)))
             return PotionsSelfTest();
+        if (args.Any(a => string.Equals(a, "--selftest-v6migrate", StringComparison.OrdinalIgnoreCase)))
+            return V6MigrateSelfTest();
 
         if (args.Any(a => string.Equals(a, "--selftest-favorites", StringComparison.OrdinalIgnoreCase)))
             return FavoritesSelfTest();
@@ -3308,6 +3310,182 @@ INSERT INTO meta(k,v) VALUES('schema_version','4');");
         {
             W("EXCEPTION: " + ex.Message);
             WriteResultNamed(log, "selftest-v5migrate-result.txt");
+            return 2;
+        }
+    }
+
+    // ---- T54: v6 schema migration + v2.9 DB methods (F51/F53/F54 data layer) ----
+
+    private static int V6MigrateSelfTest()
+    {
+        Native.TryAttachParentConsole();
+        var log = new StringBuilder();
+        var ok = true;
+        void W(string s) { log.AppendLine(s); Console.WriteLine(s); }
+        void Check(string label, bool cond) { if (!cond) ok = false; W($"  [{(cond ? "ok" : "FAIL")}] {label}"); }
+
+        SqliteConnection Open(string p) { var c = new SqliteConnection($"Data Source={p}"); c.Open(); Exec(c, "PRAGMA foreign_keys=ON;"); return c; }
+        bool HasCol(SqliteConnection c, string table, string col)
+        {
+            using var cmd = c.CreateCommand(); cmd.CommandText = $"PRAGMA table_info({table});";
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read()) if (string.Equals(rd.GetString(1), col, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+        bool Obj(SqliteConnection c, string type, string name) =>
+            Convert.ToInt64(Scalar(c, $"SELECT COUNT(*) FROM sqlite_master WHERE type='{type}' AND name='{name}';")) > 0;
+        long L(SqliteConnection c, string sql) => Convert.ToInt64(Scalar(c, sql) ?? 0L);
+
+        try
+        {
+            W($"{AppInfo.Name} v{AppInfo.Version} — v6 schema (folder_key + is_auto_seeded, T54) self-test");
+
+            // ---- Part 1: fresh DB is born at v6 with the new columns ----
+            var freshPath = FreshDb("selftest-v6-fresh.db");
+            using (new LibraryDb(freshPath)) { }
+            using (var c = Open(freshPath))
+            {
+                Check("fresh: schema_version = current (6)", L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion);
+                Check("fresh: collections.folder_key column present", HasCol(c, "collections", "folder_key"));
+                Check("fresh: potions.is_auto_seeded column present", HasCol(c, "potions", "is_auto_seeded"));
+                Check("fresh: ix_collections_folder_key index present", Obj(c, "index", "ix_collections_folder_key"));
+            }
+
+            // ---- Part 2: v5 DB (no new columns) upgrades cleanly to v6 ----
+            var v5Path = FreshDb("selftest-v5-for-v6upgrade.db");
+            using (var c = Open(v5Path))
+            {
+                Exec(c, "PRAGMA journal_mode=WAL;");
+                Exec(c, @"CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS images(id INTEGER PRIMARY KEY, source_root TEXT NOT NULL DEFAULT '', rel_path TEXT NOT NULL DEFAULT '',
+  abs_path TEXT NOT NULL DEFAULT '', file_name TEXT NOT NULL DEFAULT '', ext TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0, mtime_ticks INTEGER NOT NULL DEFAULT 0, meta_format TEXT,
+  meta_source TEXT, prompt TEXT NOT NULL DEFAULT '', negative TEXT NOT NULL DEFAULT '',
+  params_json TEXT, thumb_path TEXT, original_state TEXT NOT NULL DEFAULT 'present',
+  archived INTEGER NOT NULL DEFAULT 0, scanned_at TEXT NOT NULL DEFAULT '',
+  phash INTEGER, favorite INTEGER NOT NULL DEFAULT 0,
+  optimized INTEGER NOT NULL DEFAULT 0, opt_dim INTEGER, opt_at TEXT, UNIQUE(abs_path));
+CREATE TABLE IF NOT EXISTS image_tags(image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE, token TEXT NOT NULL, PRIMARY KEY(image_id,token));
+CREATE INDEX IF NOT EXISTS ix_image_tags_token ON image_tags(token);
+CREATE TABLE IF NOT EXISTS tag_freq(token TEXT PRIMARY KEY, df INTEGER NOT NULL);
+CREATE VIRTUAL TABLE IF NOT EXISTS images_fts USING fts5(prompt,negative,content='images',content_rowid='id');
+CREATE TABLE IF NOT EXISTS image_notes(image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE, body TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS user_tags(image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE, token TEXT NOT NULL, PRIMARY KEY(image_id,token));
+CREATE TABLE IF NOT EXISTS user_tag_freq(token TEXT PRIMARY KEY, df INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS collections(id INTEGER PRIMARY KEY, name TEXT NOT NULL, parent_id INTEGER REFERENCES collections(id), UNIQUE(name COLLATE NOCASE));
+CREATE TABLE IF NOT EXISTS collection_items(collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE, image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE, PRIMARY KEY(collection_id,image_id));
+CREATE TABLE IF NOT EXISTS potions(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL COLLATE NOCASE, query TEXT NOT NULL, created_at TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, UNIQUE(name COLLATE NOCASE));
+INSERT INTO meta(k,v) VALUES('schema_version','5');");
+                Exec(c, "INSERT INTO collections(name) VALUES('UserColl');");
+                Exec(c, "INSERT INTO potions(name,query,created_at) VALUES('MyPotion','cat','2026-01-01');");
+            }
+            using (new LibraryDb(v5Path)) { }
+            using (var c = Open(v5Path))
+            {
+                Check("v5→v6: schema_version upgraded", L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion);
+                Check("v5→v6: collections.folder_key column added", HasCol(c, "collections", "folder_key"));
+                Check("v5→v6: potions.is_auto_seeded column added", HasCol(c, "potions", "is_auto_seeded"));
+                Check("v5→v6: ix_collections_folder_key index added", Obj(c, "index", "ix_collections_folder_key"));
+                Check("v5→v6: existing collection survives with folder_key=NULL", L(c, "SELECT COUNT(*) FROM collections WHERE folder_key IS NULL;") == 1);
+                Check("v5→v6: existing potion survives with is_auto_seeded=0", L(c, "SELECT COUNT(*) FROM potions WHERE is_auto_seeded=0;") == 1);
+            }
+
+            // ---- Part 3: idempotent — opening v6 again changes nothing ----
+            using (new LibraryDb(v5Path)) { }
+            using (var c = Open(v5Path))
+            {
+                Check("idempotent: schema_version still current", L(c, "SELECT v FROM meta WHERE k='schema_version';") == LibraryDb.SchemaVersion);
+                Check("idempotent: collection count unchanged", L(c, "SELECT COUNT(*) FROM collections;") == 1);
+                Check("idempotent: potion count unchanged", L(c, "SELECT COUNT(*) FROM potions;") == 1);
+            }
+
+            // ---- Part 4: DB method smoke tests ----
+            var mPath = FreshDb("selftest-v6-methods.db");
+            using var db = new LibraryDb(mPath);
+            const string root = @"C:\FakeRoot";
+
+            // HasAutoSeedPotions / CreateAutoSeedPotion / DeleteAutoSeedPotions
+            Check("HasAutoSeedPotions: false on empty DB", !db.HasAutoSeedPotions());
+            var pid = db.CreateAutoSeedPotion("Dragon", "dragon");
+            Check("CreateAutoSeedPotion: returns id > 0", pid > 0);
+            Check("HasAutoSeedPotions: true after create", db.HasAutoSeedPotions());
+            var pid2 = db.CreateAutoSeedPotion("Dragon", "dragon"); // idempotent
+            Check("CreateAutoSeedPotion: idempotent — same id", pid2 == pid);
+            db.DeleteAutoSeedPotions();
+            Check("DeleteAutoSeedPotions: HasAutoSeedPotions false after delete", !db.HasAutoSeedPotions());
+
+            // Seed some images directly into the DB for the seeding + similarity tests
+            void InsImg(long id, string relPath, string prompt)
+            {
+                using var raw = new SqliteConnection($"Data Source={mPath}"); raw.Open();
+                using var c = raw.CreateCommand();
+                c.CommandText = @"INSERT INTO images(id,source_root,rel_path,abs_path,file_name,ext,
+                    size_bytes,mtime_ticks,prompt,negative,original_state,archived,scanned_at)
+                    VALUES($id,$root,$rel,$abs,$fn,$ext,1,1,$prompt,'','present',0,'2026-01-01');
+                    INSERT OR IGNORE INTO images_fts(rowid,prompt,negative) VALUES($id,$prompt,'');";
+                c.Parameters.AddWithValue("$id", id);
+                c.Parameters.AddWithValue("$root", root);
+                c.Parameters.AddWithValue("$rel", relPath);
+                c.Parameters.AddWithValue("$abs", root + "\\" + relPath);
+                c.Parameters.AddWithValue("$fn", System.IO.Path.GetFileName(relPath));
+                c.Parameters.AddWithValue("$ext", System.IO.Path.GetExtension(relPath));
+                c.Parameters.AddWithValue("$prompt", prompt);
+                c.ExecuteNonQuery();
+            }
+            void InsTag(long imgId, string token)
+            {
+                using var raw = new SqliteConnection($"Data Source={mPath}"); raw.Open();
+                using var c = raw.CreateCommand();
+                c.CommandText = "INSERT OR IGNORE INTO image_tags(image_id,token) VALUES($i,$t); INSERT INTO tag_freq(token,df) VALUES($t,1) ON CONFLICT(token) DO UPDATE SET df=df+1;";
+                c.Parameters.AddWithValue("$i", imgId); c.Parameters.AddWithValue("$t", token);
+                c.ExecuteNonQuery();
+            }
+
+            // Images: 1 at root, 2+3 in cats\, 4 in cats\tabby\
+            InsImg(1, "root.png", "grass field");
+            InsImg(2, @"cats\fluffy.png", "fluffy cat");
+            InsImg(3, @"cats\whiskers.png", "whiskers cat");
+            InsImg(4, @"cats\tabby\stripe.png", "striped tabby");
+
+            // IsFolderSeeded: false before seeding
+            Check("IsFolderSeeded: false before seed", !db.IsFolderSeeded(root));
+
+            // SeedCollectionsFromSourceRoot
+            var seeded = db.SeedCollectionsFromSourceRoot(root);
+            Check("SeedCollectionsFromSourceRoot: ≥1 collection created", seeded >= 1);
+            Check("IsFolderSeeded: true after seed", db.IsFolderSeeded(root));
+
+            // Verify collection for cats\ was created with correct folder_key
+            using (var c = Open(mPath))
+            {
+                var catsKey = root + @"\cats";
+                Check("seed: 'cats' collection has folder_key", L(c, $"SELECT COUNT(*) FROM collections WHERE folder_key='{catsKey}';") == 1);
+                Check("seed: cats images assigned to collection",
+                    L(c, "SELECT COUNT(*) FROM collection_items ci JOIN collections col ON col.id=ci.collection_id WHERE col.name='cats' COLLATE NOCASE;") >= 2);
+                Check("seed: root-level image NOT assigned (no subfolder)", L(c, "SELECT COUNT(*) FROM collection_items WHERE image_id=1;") == 0);
+            }
+
+            // FindSimilarByTags: add tags to images 2+3 (share 'cat'), expect similarity
+            InsTag(2, "cat"); InsTag(2, "fluffy");
+            InsTag(3, "cat"); InsTag(3, "whiskers");
+            var similar = db.FindSimilarByTags(2, threshold: 0.1, limit: 10);
+            Check("FindSimilarByTags: ≥1 result", similar.Count >= 1);
+            Check("FindSimilarByTags: top result is image 3", similar[0].Id == 3);
+            Check("FindSimilarByTags: jaccard ≥ threshold", similar[0].Jaccard >= 0.1);
+            Check("FindSimilarByTags: self not included", similar.All(r => r.Id != 2));
+
+            // FindSimilarByTags: image with no tags returns empty
+            var noTags = db.FindSimilarByTags(1, threshold: 0.1, limit: 10);
+            Check("FindSimilarByTags: empty for untagged image", noTags.Count == 0);
+
+            W(ok ? "PASS" : "FAIL");
+            WriteResultNamed(log, "selftest-v6migrate-result.txt");
+            return ok ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            W("EXCEPTION: " + ex.Message);
+            WriteResultNamed(log, "selftest-v6migrate-result.txt");
             return 2;
         }
     }

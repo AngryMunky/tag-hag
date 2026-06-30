@@ -321,6 +321,34 @@
   .lb-nav{position:absolute;top:50%;transform:translateY(-50%);font-size:34px;color:var(--bone);cursor:pointer;user-select:none;padding:0 14px;opacity:.7}
   .lb-nav:hover{opacity:1}
   #lb-prev{left:4px} #lb-next{right:352px} #lb-close{top:14px;right:14px;transform:none;font-size:22px}
+
+  /* F52 — breadcrumb row (scope=col only) */
+  #breadcrumb{display:none;flex:none;align-items:center;gap:6px;padding:6px 18px;font-size:12px;color:var(--mut);border-bottom:1px solid var(--hair);overflow:hidden;background:var(--deep)}
+  .bc-root{cursor:pointer;font-size:14px;opacity:.8;flex:none}
+  .bc-root:hover{opacity:1}
+  .bc-sep{color:#3a3147;flex:none}
+  .bc-seg{cursor:pointer;color:#b3a9c0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}
+  .bc-seg:hover{color:#ece5d6}
+  .bc-cur{color:#ece5d6;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+  .bc-ellipsis{color:#5d5568;flex:none}
+  .chk-sub{margin-left:auto;display:flex;align-items:center;gap:5px;white-space:nowrap;color:var(--mut);font-size:12px;cursor:pointer;user-select:none;flex:none}
+  .chk-sub input{accent-color:var(--acid);cursor:pointer}
+  /* F53 — Potions empty-state CTA */
+  .cta-seed{margin-top:10px;padding:8px 18px;border-radius:9px;border:1px solid rgba(164,255,106,.45);background:transparent;color:#a8d88a;font-size:13px;font-weight:600;cursor:pointer;font-family:Inter,sans-serif}
+  .cta-seed:hover{background:rgba(164,255,106,.12);color:#cfe9b3}
+  /* F54 — find-similar bar */
+  #simbar{display:none;flex:none;align-items:center;gap:10px;padding:7px 16px;background:#0f0c16;border-bottom:1px solid var(--border2);font-size:12px;color:var(--bone)}
+  #simbar #sim-back{padding:5px 11px;border-radius:8px;background:var(--input);border:1px solid var(--border);color:#b3a9c0;font-size:12px;cursor:pointer;white-space:nowrap;font-family:Inter,sans-serif}
+  #simbar #sim-back:hover{color:#ece5d6;border-color:#3a3147}
+  #sim-thumb{width:30px;height:30px;object-fit:cover;border-radius:6px;flex:none;border:1px solid var(--border)}
+  #sim-label{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#d8d0bf;min-width:0}
+  .sim-rail{display:flex;align-items:center;gap:6px;flex:none}
+  .sim-edge{font-size:11px;color:var(--mut)}
+  #sim-slider{width:100px;accent-color:var(--acid)}
+  #sim-pct{font-size:12px;color:var(--acid);white-space:nowrap;min-width:36px;text-align:right}
+  #sim-count{font-size:12px;color:var(--mut2);white-space:nowrap}
+  /* F54 — similarity badge on cards */
+  .sim-badge{position:absolute;bottom:30px;right:8px;font-size:10px;font-weight:700;padding:2px 6px;border-radius:999px;background:rgba(12,9,16,.75);color:var(--acid);z-index:3;pointer-events:none}
 </style>
 </head>
 <body>
@@ -348,7 +376,9 @@
       <span>Potions</span><span class="colnewbtn" id="potnew" title="New Potion — build a named saved search from scratch">＋ New</span>
     </div>
     <nav id="potnav"></nav>
-    <div class="v2note" id="potempty">No Potions brewed yet. Search for tags above, then tap Save as Potion to bottle that search — or use ＋ New to build one from scratch. Your brews live here for instant recall.</div>
+    <div class="v2note" id="potempty">No Potions brewed yet. Search for tags above, then tap Save as Potion to bottle that search — or use ＋ New to build one from scratch. Your brews live here for instant recall.
+      <br/><button class="cta-seed" id="cta-seed-btn">🧪 Auto-seed Potions</button>
+    </div>
   </aside>
 
   <!-- ===================== CENTER ===================== -->
@@ -374,6 +404,22 @@
       <label id="dupctl" title="Also group images within a small visual distance" style="display:none;align-items:center;gap:6px;color:var(--mut);font-size:12px;cursor:pointer;white-space:nowrap;user-select:none"><input type="checkbox" id="dupnear" /> Include near-dups</label>
       <!-- v2.8/T53: Tags ▾ + density buttons removed (F42; density now driven by the WinForms View menu). -->
       <div class="tbtn on" id="panelbtn" title="Toggle info panel">Info</div>
+    </div>
+
+    <!-- F52: breadcrumb row (shown only when scope=col; populated by renderBreadcrumb()) -->
+    <div id="breadcrumb"></div>
+    <!-- F54: find-similar bar (shown only during sim mode) -->
+    <div id="simbar">
+      <button id="sim-back">← Back</button>
+      <img id="sim-thumb" alt="" />
+      <span id="sim-label">Similar to: —</span>
+      <div class="sim-rail">
+        <span class="sim-edge">Broad</span>
+        <input type="range" id="sim-slider" min="50" max="100" step="5" value="70" />
+        <span class="sim-edge">Exact</span>
+      </div>
+      <span id="sim-pct">≥70%</span>
+      <span id="sim-count"></span>
     </div>
 
     <div id="gridwrap">
@@ -488,6 +534,7 @@
     <button class="lb-btn" data-copy="full">Copy full A1111</button>
     <button class="lb-btn" id="lb-rawbtn" style="display:none">Raw metadata</button>
     <pre id="lb-raw"></pre>
+    <button class="lb-btn" id="lb-sim">Find similar…</button>
   </aside>
   <div id="lb-prev" class="lb-nav">‹</div><div id="lb-next" class="lb-nav">›</div><div id="lb-close" class="lb-nav">✕</div>
 </div>
@@ -550,7 +597,7 @@
   let scope='all';                              // all | favorites | optimized | untagged | col | folder | dupes
   let currentCid=null;                          // active collection id when scope==='col' (T28)
   let currentFolderPath=null, currentFolderRoot=null, folderSubtree=false;  // active folder node + subtree toggle (T33/F24)
-  let collSubtree=false;                             // include sub-collections toggle (T42/F29)
+  let collSubtree=true;                              // include sub-collections toggle (T42/F29; default true per A55)
   let acItems=[],acSel=-1;
   let tagAcItems=[],tagAcSel=-1;                 // separate AC state for the TAGS add-input (T26)
   let colsCache=[];                              // flat {id,name,count,depth}[] derived from tree (T28/T41)
@@ -559,6 +606,9 @@
   let sel=new Set(), lastIdx=-1;
   let dupeMode=false, nearDupes=false;
   const TITLES={all:'All Images',dupes:'Duplicates',favorites:'Favorites',optimized:'Optimized',untagged:'Untagged'};
+  // F54 Find-similar state
+  let simMode=false, simSourceId=null, simThreshold=0.7, simItems=[];
+
   // T46/F32 Potions state
   let activePotion=null;                            // {pid,name,query} or null when no Potion is active
   let potDialogMode='create',potDialogPid=null;
@@ -588,7 +638,7 @@
     document.querySelectorAll('#folnav .navrow').forEach(r=>r.classList.remove('on'));   // clear folder highlight
     $('#viewtitle').textContent=TITLES[scope]||'All Images';
     if(scope==='dupes'){ $('#dupctl').style.display='flex'; runDupes(); }
-    else { dupeMode=false; $('#dupctl').style.display='none'; refresh(); }   // v2.8.2 BUGFIX: #cnt-dupes was removed in v2.7.2; the null .textContent='' threw here, before refresh() — breaking ALL sidebar scope switches
+    else { dupeMode=false; $('#dupctl').style.display='none'; refresh(); renderBreadcrumb(); }   // v2.8.2 BUGFIX: #cnt-dupes was removed in v2.7.2; the null .textContent='' threw here, before refresh() — breaking ALL sidebar scope switches
   });
   // Find Duplicates: ask the host to backfill hashes + group, then render the set (sentinel blocked).
   function runDupes(){ dupeMode=true; resetGrid(); exhausted=true; loading=true; countEl.textContent='Scanning…'; post({type:'dupes',near:nearDupes,gen}); }
@@ -687,6 +737,8 @@
       {label:'★ Favorite', on:sel.size>0, run:favSel} ];
     if(colsCache.length) a.push({label:'＋ Add to Collection…', on:true, run:openColPicker});
     a.push({label:'⧉ Copy', on:true, run:()=>doOp('copy')});
+    if(sel.size===1) a.push({label:'🔍 Find similar…', on:true, run:()=>{
+      const id=[...sel][0]; clearSel(); post({type:'findsimilar',id,threshold:simThreshold}); }});
     return a; }
   function openMoreMenu(){ hideMovePick(); hideColPick(); const m=$('#moremenu'); m.innerHTML='';
     moreActions().forEach(x=>{ const d=document.createElement('div'); d.textContent=x.label;
@@ -787,6 +839,7 @@
     star.onclick=(e)=>{ e.stopPropagation(); const on=!star.classList.contains('on'); star.classList.toggle('on',on); it.favorite=on; post({type:'fav',id:it.id,on}); };
     c.appendChild(star);
     if(it.optimized){ const ob=document.createElement('div'); ob.className='optbadge'; ob.textContent='✨O'; ob.title='Optimized'; c.appendChild(ob); }   // T31
+    if(it.sim!==undefined){ const sb=document.createElement('div'); sb.className='sim-badge'; sb.textContent=Math.round(it.sim*100)+'%'; c.appendChild(sb); }   // F54
     c.onclick=(e)=>selectClick(idx,e);
     c.ondblclick=()=>openLb(idx);
     c.ondragstart=(e)=>cardDragStart(e,idx); c.ondragend=cardDragEnd;   // T35/F25 drag-to-folder
@@ -929,11 +982,11 @@
       const cnt=document.createElement('span'); cnt.className='cnt';
       cnt.textContent=collSubtree?n.countRecursive:n.count;
       right.appendChild(act); right.appendChild(cnt); row.appendChild(right);
-      row.onclick=()=>{ deactivatePotionSilent(); scope='col'; currentCid=n.id; currentFolderPath=null; currentFolderRoot=null; dupeMode=false; $('#dupctl').style.display='none';
+      row.onclick=()=>{ deactivatePotionSilent(); scope='col'; currentCid=n.id; collSubtree=true; currentFolderPath=null; currentFolderRoot=null; dupeMode=false; $('#dupctl').style.display='none';
         document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.remove('on'));
         document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.toggle('on',r===row));
         document.querySelectorAll('#folnav .navrow').forEach(r=>r.classList.remove('on'));
-        $('#viewtitle').textContent=n.name; refresh(); };
+        $('#viewtitle').textContent=n.name; refresh(); renderBreadcrumb(); };
       // v2.8.4: per-row drop target for drag-to-collection (robust — no delegation/closest; works on child/text targets).
       row.addEventListener('dragover',e=>{ if(!dragIds.length) return; e.preventDefault(); try{ e.dataTransfer.dropEffect='copy'; }catch(_){}
         if(!row.classList.contains('drop')){ clearColDropHi(); row.classList.add('drop'); } });
@@ -946,6 +999,49 @@
     walk(colsTree,0);
     if(sel.size) updateBar();   // the Add-to-collection pill depends on colsCache being non-empty
   }
+  // F52: walk colsTree to build ordered path [{id,name},...] from root down to cid (inclusive).
+  function getAncestors(cid){
+    function walk(nodes,path){ for(const n of (nodes||[])){
+      const p=[...path,{id:n.id,name:n.name}];
+      if(n.id===cid) return p;
+      const r=walk(n.children||[],p); if(r) return r; } return null; }
+    return walk(colsTree,[])||[]; }
+
+  // F52: render/hide the breadcrumb row for the current scope/collection.
+  function renderBreadcrumb(){
+    const bc=$('#breadcrumb');
+    if(scope!=='col'||!currentCid){ bc.style.display='none'; return; }
+    const path=getAncestors(currentCid);
+    if(!path.length){ bc.style.display='none'; return; }
+    bc.style.display='flex'; bc.title=''; bc.innerHTML='';
+    const ancestors=path.slice(0,-1), curNode=path[path.length-1];
+    const ri=document.createElement('span'); ri.className='bc-root'; ri.textContent='🗂'; ri.title='All Images';
+    ri.onclick=()=>{ document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.toggle('on',r.dataset.scope==='all'));
+      document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.remove('on'));
+      scope='all'; currentCid=null; $('#viewtitle').textContent='All Images'; refresh(); bc.style.display='none'; };
+    bc.appendChild(ri);
+    let segs=ancestors;
+    if(path.length>4){ bc.title=path.map(n=>n.name).join(' › ');
+      segs=ancestors.length>0?[{id:null,name:'…'},ancestors[ancestors.length-1]]:[]; }
+    function mkSep(){ const s=document.createElement('span'); s.className='bc-sep'; s.textContent='›'; return s; }
+    segs.forEach(seg=>{
+      bc.appendChild(mkSep());
+      const s=document.createElement('span');
+      if(seg.id){ s.className='bc-seg'; s.textContent=seg.name;
+        s.onclick=()=>{ currentCid=seg.id; collSubtree=true; $('#viewtitle').textContent=seg.name;
+          document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.toggle('on',Number(r.dataset.cid)===seg.id));
+          refresh(); renderBreadcrumb(); };
+      } else { s.className='bc-ellipsis'; s.textContent='…'; }
+      bc.appendChild(s); });
+    bc.appendChild(mkSep());
+    const cv=document.createElement('span'); cv.className='bc-cur'; cv.textContent=curNode.name; bc.appendChild(cv);
+    // Include-sub toggle, right-aligned inside the breadcrumb row
+    const lbl=document.createElement('label'); lbl.className='chk-sub';
+    const chk=document.createElement('input'); chk.type='checkbox'; chk.id='chk-includesub'; chk.checked=collSubtree;
+    chk.onchange=()=>{ collSubtree=chk.checked; refresh(); };
+    lbl.appendChild(chk); lbl.appendChild(document.createTextNode(' Include sub-collections'));
+    bc.appendChild(lbl); }
+
   function openColPicker(){ if(!sel.size||!colsCache.length){ hideColPick(); return; } hideMovePick(); hideMoreMenu();
     colpick.innerHTML=''; colsCache.forEach(c=>{ const d=document.createElement('div');
       const pfx=' '.repeat(c.depth||0);
@@ -1056,7 +1152,7 @@
     document.querySelectorAll('#potnav .potrow').forEach(r=>r.classList.toggle('on',Number(r.dataset.pid)===pid));
     $('#searchbox').style.display='none'; $('#pot-active-strip').style.display='flex';
     $('#pot-active-name').textContent=name; $('#pot-save').style.display='none';
-    $('#viewtitle').textContent=name; refresh(); }
+    $('#viewtitle').textContent=name; refresh(); renderBreadcrumb(); }
   function clearPotion(preloadSearch){ const prev=activePotion; activePotion=null;
     $('#searchbox').style.display=''; $('#pot-active-strip').style.display='none';
     document.querySelectorAll('#potnav .potrow').forEach(r=>r.classList.remove('on'));
@@ -1066,7 +1162,7 @@
     document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.toggle('on',r.dataset.scope==='all'));
     document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.remove('on'));
     document.querySelectorAll('#folnav .navrow').forEach(r=>r.classList.remove('on'));
-    $('#viewtitle').textContent='All Images'; updatePotSave(); refresh(); }
+    $('#viewtitle').textContent='All Images'; updatePotSave(); refresh(); renderBreadcrumb(); }
   $('#potnew').onclick=()=>openPotDialog('create',null,'','');
   $('#pot-active-clear').onclick=e=>{ e.stopPropagation(); clearPotion(false); };
   $('#pot-active-strip').onclick=()=>clearPotion(true);
@@ -1104,6 +1200,33 @@
   $('#pot-undo-link').onclick=()=>{ if(!potUndoData)return; clearTimeout(potUndoTimer);
     post({type:'potcreate',name:potUndoData.name,query:potUndoData.query});
     $('#pot-undo').classList.remove('open'); potUndoData=null; };
+
+  // ---- F54: find-similar mode ----
+  function renderSimGrid(){
+    resetGrid(); addCards(simItems); exhausted=true; loading=false;
+    const t=simItems.length; countEl.textContent=t.toLocaleString()+' result'+(t===1?'':'s');
+    if(t===0){ $('#emptytitle').textContent='No similar images found.'; $('#emptysub').textContent='Try lowering the similarity threshold.'; $('#emptybtn').style.display='none'; emptyMsg.style.display='flex'; } }
+  function enterSimMode(sourceId, threshold, items){
+    simMode=true; simSourceId=sourceId; simThreshold=threshold; simItems=items;
+    $('#simbar').style.display='flex';
+    $('#sim-thumb').src='https://thumb.local/'+sourceId;
+    const srcIt=loaded.find(x=>x.id===sourceId);
+    $('#sim-label').textContent='Similar to: '+(srcIt?(srcIt.name||srcIt.fileName||'image '+sourceId):('image '+sourceId));
+    const pct=Math.round(threshold*100);
+    $('#sim-slider').value=pct; $('#sim-pct').textContent='≥'+pct+'%';
+    $('#sim-count').textContent=items.length+' result'+(items.length===1?'':'s');
+    renderSimGrid(); }
+  function exitSimMode(){
+    simMode=false; simItems=[]; $('#simbar').style.display='none'; refresh(); }
+  $('#sim-back').onclick=()=>exitSimMode();
+  $('#sim-slider').oninput=function(){
+    simThreshold=this.value/100; $('#sim-pct').textContent='≥'+this.value+'%';
+    post({type:'findsimilarmore',threshold:simThreshold}); };
+  // F53: CTA seed button (inside IIFE so post() is in scope)
+  const ctaSeedBtn=$('#cta-seed-btn');
+  if(ctaSeedBtn) ctaSeedBtn.onclick=()=>post({type:'autoseedpotions'});
+  // F54: lightbox "Find similar…"
+  $('#lb-sim').onclick=()=>{ if(!curMeta) return; const id=curMeta.id; closeLb(); post({type:'findsimilar',id,threshold:simThreshold}); };
 
   // ---- T36/F26 import/scan progress overlay (over #gridwrap; sidebar + top bar stay usable) ----
   const scanOv=$('#scanoverlay'), scanFill=$('#scanbarfill'), scanPhaseEl=$('#scanphase'), scanPctEl=$('#scanpct');
@@ -1181,7 +1304,9 @@
     else if(m.type==='wd14done'){ handleWd14Done(m); }
     else if(m.type==='wd14singledone'){ handleWd14SingleDone(m); }
     else if(m.type==='density'){ setDense(!!m.compact); }                      // v2.8/T53: View-menu density (init reply + each change)
-    else if(m.type==='menuop'){ handleMenuOp(m.op); } });                      // v2.8/T53: WinForms File menu → gallery op path
+    else if(m.type==='menuop'){ handleMenuOp(m.op); }                         // v2.8/T53: WinForms File menu → gallery op path
+    else if(m.type==='similarresult'){ simThreshold=m.threshold||0.7; enterSimMode(m.sourceId,simThreshold,m.items||[]); }   // F54
+    else if(m.type==='colseeded'){ /* cols tree already pushed via {type:'cols'}; status set by C# SetStatus */ } });   // F51
 
   new IntersectionObserver(es=>{ if(es[0].isIntersecting) requestPage(); },{root:scroll,rootMargin:'400px'}).observe($('#sentinel'));
   requestPage(); post({type:'counts'}); post({type:'cols'}); post({type:'folders'}); post({type:'potions'}); post({type:'getdensity'});   // T28/T33 sidebars + F32 Potions + v2.8/T53 density pull

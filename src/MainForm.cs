@@ -20,6 +20,8 @@ public sealed class MainForm : Form
     // File-menu items kept as fields so UpdateFileMenu() can grey/enable them by selection.
     private ToolStripMenuItem _miMove = null!, _miRename = null!, _miDelete = null!, _miFav = null!, _miCopy = null!, _miClear = null!;
     private ToolStripMenuItem _miComfortable = null!, _miCompact = null!;   // View density (radio)
+    private ToolStripMenuItem _miResetPotions = null!;   // F53: enabled only when auto-seeded potions exist
+    private long _lastSimSourceId;   // F54: source image id from last findsimilar query
     private int _selCount;     // cached gallery selection count (from the selchange bridge message)
     private bool _selSingle;   // exactly one image selected
     private readonly ToolStripStatusLabel _statusLabel = new("Ready") { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
@@ -85,6 +87,10 @@ public sealed class MainForm : Form
         folders.DropDownItems.Add(new ToolStripMenuItem("Add Source Folder", null, (_, _) => AddSourceFolder()));
         folders.DropDownItems.Add(new ToolStripMenuItem("Scan", null, async (_, _) => await DoScan()));
         folders.DropDownItems.Add(new ToolStripMenuItem("Optimize Library…", null, (_, _) => OpenOptimizeLibrary()));
+        folders.DropDownItems.Add(new ToolStripSeparator());
+        folders.DropDownItems.Add(new ToolStripMenuItem("Auto-seed Potions…", null, (_, _) => OnAutoSeedPotionsClick()));
+        _miResetPotions = new ToolStripMenuItem("Reset Auto-Potions", null, (_, _) => OnResetPotionsClick());
+        folders.DropDownItems.Add(_miResetPotions);
 
         // View — gallery density (mutually-exclusive checks; persisted in AppSettings.Compact).
         var view = new ToolStripMenuItem("&View");
@@ -100,6 +106,7 @@ public sealed class MainForm : Form
 
         _menu.Items.AddRange(new ToolStripItem[] { file, folders, view, civitai, settings, about });
         UpdateFileMenu();
+        UpdateFoldersMenu();
     }
 
     /// <summary>A File-menu item that triggers the gallery's selection-op via the menuop bridge.
@@ -472,6 +479,26 @@ public sealed class MainForm : Form
                 return;
             }
             if (type == "wd14setup") { _ = OpenSettings(); return; }
+            // F53 — Potion empty-state CTA and template bridge triggers (mirrors Folders menu items).
+            if (type == "autoseedpotions") { OnAutoSeedPotionsClick(); return; }
+            if (type == "resetautopotions") { OnResetPotionsClick(); return; }
+            // F54 — Find similar by tags: run SQL Jaccard and push similarresult to the template.
+            if (type == "findsimilar")
+            {
+                if (d.RootElement.TryGetProperty("id", out var fsId))
+                {
+                    _lastSimSourceId = fsId.GetInt64();
+                    var fsThr = d.RootElement.TryGetProperty("threshold", out var fstEl) && fstEl.ValueKind == JsonValueKind.Number ? fstEl.GetDouble() : 0.7;
+                    PostSimilarResult(_lastSimSourceId, fsThr);
+                }
+                return;
+            }
+            if (type == "findsimilarmore")
+            {
+                var fmThr = d.RootElement.TryGetProperty("threshold", out var fmtEl) && fmtEl.ValueKind == JsonValueKind.Number ? fmtEl.GetDouble() : 0.7;
+                PostSimilarResult(_lastSimSourceId, fmThr);
+                return;
+            }
             // T33 / F24 folder rename: physically rename the folder, then repath every indexed row
             // under it in one tx (ids + user-state preserved). Disk move runs first, so a collision/
             // error leaves the DB untouched (no data loss). Silent (pushes {type:'reload'}).
@@ -765,8 +792,29 @@ public sealed class MainForm : Form
                       $"{_db.ImageCount(includeArchived: false):n0} images.");
             _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "scandone", added = r.Added, updated = r.Updated, removed = r.Removed, failed = r.Failed, reLinked = r.ReLinked, unmatched = r.Unmatched, canceled = false }));
             _web.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reload\"}");
-            AutoSeedPotions();   // T45/F32: seeds once when library first reaches threshold; pushes + status intro if triggered
+            // F51: first-time seeding for unseeded source roots; assign new images to existing folder collections.
+            int totalSeeded = 0;
+            foreach (var root in _settings.SourceRoots)
+            {
+                if (!_db.IsFolderSeeded(root))
+                {
+                    int n = _db.SeedCollectionsFromSourceRoot(root);
+                    if (n > 0)
+                    {
+                        totalSeeded += n;
+                        PushCols();
+                        _web.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "colseeded", count = n }));
+                    }
+                }
+                else
+                {
+                    _db.AssignNewImagesToFolderCollections(root);
+                }
+            }
+            if (totalSeeded > 0) SetStatus($"Collections seeded from folder structure ({totalSeeded} created).");
+            AutoSeedPotions();   // T45/F32 (updated F53): seeds once when library first reaches threshold; pushes + status if triggered
             PushPotions();       // always refresh live Potion counts after library changes
+            UpdateFoldersMenu(); // F53: refresh Reset Auto-Potions enabled state
         }
         catch (OperationCanceledException)
         {
@@ -1242,7 +1290,7 @@ public sealed class MainForm : Form
         long bytes  = sfPrev.Bytes  > 0 ? sfPrev.Bytes  : colPrev.Bytes;
 
         using var dlg = new OptimizeLibraryForm(count, bytes, _settings.MaxDim, _settings.DefaultMode,
-            OrganizeBy.SourceFolders, inColl, uncoll, tieCands, tree);
+            OrganizeBy.Collections, inColl, uncoll, tieCands, tree);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         _ = HandleOptimizeLibrary("all", null, dlg.MaxDim, dlg.Mode, ++_optGen,
             dlg.OrganizeBy, dlg.SkipUncollected, dlg.TieOverrides, tree);
@@ -1409,18 +1457,77 @@ public sealed class MainForm : Form
         if (r is not null) _web.CoreWebView2?.PostWebMessageAsString(r);
     }
 
-    /// <summary>One-time auto-seed: creates Potions from the top frequent prompt tags (T45/F32).
-    /// Called after DB open at startup and at the end of DoScan until seeded. Silent on an empty
-    /// library (returns without marking seeded so the next scan retries).</summary>
+    /// <summary>Auto-seed Potions from top frequent prompt tags (T45/F32, updated F53/T55).
+    /// Skips if auto-seeded Potions already exist (self-healing guard — no separate meta flag).
+    /// Silent on an empty library (returns without seeding so the next scan retries).</summary>
     private void AutoSeedPotions()
     {
-        if (_db.IsPotionSeeded()) return;
-        var tags = _db.TopSeedableTags(minCount: 50, maxFraction: 0.80, limit: 10);
-        if (tags.Count == 0) return;   // library too small or all tags are universal — retry after next scan
-        foreach (var tag in tags) _db.CreatePotion(name: tag, query: tag);
-        _db.MarkPotionSeeded();
+        if (_db.HasAutoSeedPotions()) return;
+        var tags = _db.TopSeedableTags(minCount: 50, maxFraction: 0.80, limit: 25);
+        if (tags.Count == 0) return;   // library too small or all tags near-universal — retry after next scan
+        foreach (var tag in tags) _db.CreateAutoSeedPotion(name: tag, query: tag);
         PushPotions();
         SetStatus($"🧪 Potions ready — brewed {tags.Count} from your most common tags.");
+    }
+
+    /// <summary>F53 — Folders → Auto-seed Potions… click (and template CTA bridge). Force-runs the
+    /// seed (no HasAutoSeedPotions guard) so the user can refresh on demand.</summary>
+    private void OnAutoSeedPotionsClick()
+    {
+        if (MessageBox.Show(this,
+            "Create Potions for your top 25 most-used tags? Potions you've created yourself are not affected.",
+            "Auto-seed Potions", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+        var tags = _db.TopSeedableTags(minCount: 50, maxFraction: 0.80, limit: 25);
+        if (tags.Count == 0) { SetStatus("Not enough data yet — try again after scanning a larger library."); return; }
+        foreach (var tag in tags) _db.CreateAutoSeedPotion(name: tag, query: tag);
+        PushPotions();
+        SetStatus($"🧪 {tags.Count} Potions seeded from top tags.");
+        UpdateFoldersMenu();
+    }
+
+    /// <summary>F53 — Folders → Reset Auto-Potions click (and template bridge). Deletes only
+    /// auto-seeded Potions (is_auto_seeded=1); user-created Potions are untouched.</summary>
+    private void OnResetPotionsClick()
+    {
+        if (!_db.HasAutoSeedPotions()) return;
+        if (MessageBox.Show(this,
+            "Remove all auto-seeded Potions? Potions you've created yourself are not affected.",
+            "Reset Auto-Potions", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+        int n = _db.DeleteAutoSeedPotions();
+        PushPotions();
+        SetStatus($"{n} auto-seeded Potion{(n == 1 ? "" : "s")} removed.");
+        UpdateFoldersMenu();
+    }
+
+    /// <summary>F53 — enable/grey the Reset Auto-Potions menu item based on current DB state.</summary>
+    private void UpdateFoldersMenu()
+    {
+        if (_miResetPotions is null) return;
+        _miResetPotions.Enabled = _db?.HasAutoSeedPotions() ?? false;
+    }
+
+    /// <summary>F54 — run FindSimilarByTags and push a similarresult message to the gallery.</summary>
+    private void PostSimilarResult(long sourceId, double threshold)
+    {
+        var similar = _db.FindSimilarByTags(sourceId, threshold, limit: 200);
+        var items = similar
+            .Select(r => new { Row = _db.GetById(r.Id), r.Jaccard })
+            .Where(x => x.Row is not null)
+            .Select(x => new
+            {
+                id       = x.Row!.Id,
+                url      = UrlFor(x.Row),
+                fileName = x.Row.FileName,
+                format   = x.Row.MetaFormat,
+                prompt   = x.Row.Prompt,
+                favorite = x.Row.Favorite,
+                optimized = x.Row.Optimized,
+                sim      = Math.Round(x.Jaccard, 2)
+            })
+            .ToArray();
+        if (items.Length == 0) SetStatus("No similar images found — try a lower threshold.");
+        _web.CoreWebView2?.PostWebMessageAsString(
+            JsonSerializer.Serialize(new { type = "similarresult", sourceId, threshold, items }));
     }
 
     private void RestoreWindowBounds()
