@@ -99,7 +99,8 @@
   #sentinel{height:1px}
 
   /* empty state */
-  #emptymsg{display:none;position:absolute;inset:0;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:40px;text-align:center}
+  /* v2.8.3 (user-chosen Option B): backdrop matches the cauldron asset's outer-edge color (~#040509) so the graphic's box blends seamlessly — empty-state region only (cleared when the grid has cards). */
+  #emptymsg{display:none;position:absolute;inset:0;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:40px;text-align:center;background:#040509}
   .hat-halo{width:120px;height:120px;border-radius:50%;background:radial-gradient(circle at 50% 60%,rgba(164,255,106,.18),transparent 65%);display:flex;align-items:flex-end;justify-content:center}
   .hat{width:74px;height:50px;border-radius:0 0 38px 38px;background:linear-gradient(180deg,#241b30,#15101c);border:2px solid #3a2f48;position:relative}
   .hat .brim{position:absolute;top:-7px;left:-9px;right:-9px;height:13px;border-radius:50%;background:#2a2136;border:2px solid #3a2f48}
