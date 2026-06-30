@@ -13,6 +13,8 @@ A portable, single-file **Windows desktop app** for managing a large local libra
 
 Grab **`TheTagHag.exe`** from the [**Releases**](https://github.com/AngryMunky/tag-hag/releases/latest) page — one self-contained file. No installer, no .NET required; just run it.
 
+📜 See the [**CHANGELOG**](CHANGELOG.md) for the full version history.
+
 ## How it's organised
 
 Tag Hag keeps three distinct layers so you always know where an image actually lives:
