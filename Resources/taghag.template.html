@@ -587,11 +587,11 @@
     document.querySelectorAll('#folnav .navrow').forEach(r=>r.classList.remove('on'));   // clear folder highlight
     $('#viewtitle').textContent=TITLES[scope]||'All Images';
     if(scope==='dupes'){ $('#dupctl').style.display='flex'; runDupes(); }
-    else { dupeMode=false; $('#dupctl').style.display='none'; $('#cnt-dupes').textContent=''; refresh(); }
+    else { dupeMode=false; $('#dupctl').style.display='none'; refresh(); }   // v2.8.2 BUGFIX: #cnt-dupes was removed in v2.7.2; the null .textContent='' threw here, before refresh() — breaking ALL sidebar scope switches
   });
   // Find Duplicates: ask the host to backfill hashes + group, then render the set (sentinel blocked).
   function runDupes(){ dupeMode=true; resetGrid(); exhausted=true; loading=true; countEl.textContent='Scanning…'; post({type:'dupes',near:nearDupes,gen}); }
-  function exitDupes(){ dupeMode=false; scope='all'; $('#dupctl').style.display='none'; $('#cnt-dupes').textContent='';
+  function exitDupes(){ dupeMode=false; scope='all'; $('#dupctl').style.display='none';
     document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.toggle('on',r.dataset.scope==='all'));
     $('#viewtitle').textContent='All Images'; }
   $('#dupnear').onchange=()=>{ nearDupes=$('#dupnear').checked; if(dupeMode) runDupes(); };
@@ -941,7 +941,7 @@
       const cnt=document.createElement('span'); cnt.className='cnt';
       cnt.textContent=collSubtree?n.countRecursive:n.count;
       right.appendChild(act); right.appendChild(cnt); row.appendChild(right);
-      row.onclick=()=>{ deactivatePotionSilent(); scope='col'; currentCid=n.id; currentFolderPath=null; currentFolderRoot=null; dupeMode=false; $('#dupctl').style.display='none'; $('#cnt-dupes').textContent='';
+      row.onclick=()=>{ deactivatePotionSilent(); scope='col'; currentCid=n.id; currentFolderPath=null; currentFolderRoot=null; dupeMode=false; $('#dupctl').style.display='none';
         document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.remove('on'));
         document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.toggle('on',r===row));
         document.querySelectorAll('#folnav .navrow').forEach(r=>r.classList.remove('on'));
@@ -1055,7 +1055,7 @@
       nav.appendChild(row); }); }
   function activatePotion(pid,name,query){ activePotion={pid,name,query}; raw=query; hideAc();
     scope='all'; currentCid=null; currentFolderPath=null; currentFolderRoot=null; dupeMode=false;
-    $('#dupctl').style.display='none'; $('#cnt-dupes').textContent='';
+    $('#dupctl').style.display='none';
     document.querySelectorAll('#libnav .navrow').forEach(r=>r.classList.remove('on'));
     document.querySelectorAll('#colnav .navrow').forEach(r=>r.classList.remove('on'));
     document.querySelectorAll('#folnav .navrow').forEach(r=>r.classList.remove('on'));
@@ -1168,7 +1168,6 @@
     else if(m.type==='autotag'){ if(m.gen!==undefined && m.gen!==atGen) return; renderAutotag(m); }   // drop a superseded run
     else if(m.type==='dupes'){ if(m.gen!==undefined && m.gen!==gen) return;   // drop a superseded dupes scan
       loading=false; dupeMode=true; total=m.total; addCards(m.items||[]);
-      $('#cnt-dupes').textContent = m.groups>0 ? m.groups.toLocaleString() : '0';
       countEl.textContent = m.groups>0 ? (m.groups.toLocaleString()+' duplicate set'+(m.groups===1?'':'s')+' · '+m.total.toLocaleString()+' image'+(m.total===1?'':'s')) : 'No duplicates found';
       if(m.total===0){ $('#emptytitle').textContent='No duplicates found.'; $('#emptysub').textContent=nearDupes?'No matching or near-matching images in the hoard.':'No exact matches — try “Include near-dups”.'; $('#emptybtn').style.display='none'; emptyMsg.style.display='flex'; }
       else emptyMsg.style.display='none'; }
